@@ -1,0 +1,20 @@
+[package]
+name = "pi-coding-agent"
+description = "Interactive coding agent CLI for Pi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "pi"
+path = "src/main.rs"
+
+[dependencies]
+pi-agent-core = { path = "../pi-agent-core" }
+pi-ai = { path = "../pi-ai" }
+pi-tui = { path = "../pi-tui" }
+
+[lints]
+workspace = true

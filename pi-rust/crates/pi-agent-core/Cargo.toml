@@ -1,0 +1,14 @@
+[package]
+name = "pi-agent-core"
+description = "Agent runtime and state management for Pi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+pi-ai = { path = "../pi-ai" }
+
+[lints]
+workspace = true
