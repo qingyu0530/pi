@@ -1,5 +1,12 @@
 //! Model and conversation types shared by Pi providers.
 
+mod content;
+
+pub use content::{
+    AssistantContent, ImageContent, TextContent, TextPhase, TextSignature, ThinkingContent,
+    ToolCall, ToolResultContent, UserContent,
+};
+
 /// The author of a conversation message.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Role {
