@@ -1,10 +1,18 @@
 //! Model and conversation types shared by Pi providers.
-
+// 声明 content 模块
+// 因此编译器会加载同一目录下的 content.rs
 mod content;
+// 接入 pi-ai
+mod message;
 
 pub use content::{
     AssistantContent, ImageContent, TextContent, TextPhase, TextSignature, ThinkingContent,
     ToolCall, ToolResultContent, UserContent,
+};
+pub use message::{
+    AssistantMessage, AssistantMessageDiagnostic, AssistantRole, DeferredHandle,
+    DiagnosticErrorCode, DiagnosticErrorInfo, StopReason, Usage, UsageCost, UserMessage,
+    UserMessageContent, UserRole,
 };
 
 /// The author of a conversation message.
