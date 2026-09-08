@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 // 可以近似理解为 C++：
 // using pi_ai::content::UserContent;
 // 这里的 crate 是 Rust 的固定关键字，表示“当前 crate 的根
-use crate::content::{AssistantContent, UserContent};
+use crate::content::{AssistantContent, ToolResultContent, UserContent};
 use serde_json::{Map, Number, Value};
 
 /// 用户消息的固定角色。不能使用 Assistant 或 Tool 等其他角色。
@@ -357,3 +357,115 @@ pub struct AssistantMessage {
     pub end_turn: Option<bool>,
     pub timestamp: u64,
 }
+
+// -----------------------------------------------------------------------------
+// 新增：工具结果消息类型
+// 工具执行后，需要把结果和原先的 ToolCall 关联起来，交还给模型。
+// -----------------------------------------------------------------------------
+
+/// 工具结果消息的固定角色。JSON 协议中使用 "toolResult"。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+// 工具执行结果
+pub enum ToolResultRole {
+    #[serde(rename = "toolResult")]
+    ToolResult,
+}
+
+/// 对应原版 types.ts 中的 ToolResultMessage。
+///
+/// TDetails 是工具特有的附加结果类型；未指定时默认保存任意 JSON 值 Value。
+/// C++ 对照：template <typename TDetails = JsonValue>。
+/// 工具执行完成后交回模型的结果。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+// 模型请求调用一个工具后，程序实际执行工具，并把执行结果返回给模型。
+pub struct ToolResultMessage<TDetails = Value> {
+    pub role: ToolResultRole,
+    /// 与之前 AssistantContent::ToolCall(ToolCall) 中 ToolCall.id 对应。
+    // 对应此前模型发出的 ToolCall.id
+    // 这个字段很关键，因为模型一次回复可能请求多个工具
+    pub tool_call_id: String,
+    pub tool_name: String,
+    /// 工具只能返回文本或图片，不能返回助手的思考或新的工具调用。
+    /// 工具实际返回给模型的内容。
+    pub content: Vec<ToolResultContent>,
+    // 工具专用的附加结果，不一定需要发送给模型作为主要内容，
+    // 但程序内部可能需要保存
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<TDetails>,
+    /// 工具自身的用量，不计入模型上下文的 token 用量。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    // 执行工具本身的资源统计
+    // 例如某个远程搜索工具也可能消耗 token、请求次数或费用，可以记录
+    // 普通本地读取文件工具通常没有模型 token 用量：
+    pub usage: Option<Usage>,
+    /// 这次工具执行后新增、可供模型在下一轮调用的工具名称。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    // 表示执行当前工具后，有哪些新工具可以在下一轮提供给模型
+    pub added_tool_names: Option<Vec<String>>,
+    // 工具是否执行失败
+    pub is_error: bool,
+    // 工具结果产生的 Unix 毫秒时间戳
+    pub timestamp: u64,
+}
+
+// -----------------------------------------------------------------------------
+// 新增：完整对话消息类型
+// 原版 TypeScript：Message = UserMessage | AssistantMessage | ToolResultMessage。
+// -----------------------------------------------------------------------------
+
+/// 对话中允许出现的三种完整消息。
+///
+/// 使用 untagged 后，JSON 直接保存每种消息本身，不额外包裹 User、Assistant 或 ToolResult。
+/// C++ 对照：std::variant<UserMessage, AssistantMessage, ToolResultMessage>。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ConversationMessage {
+    User(UserMessage),
+    Assistant(AssistantMessage),
+    ToolResult(ToolResultMessage),
+}
+
+impl From<UserMessage> for ConversationMessage {
+    fn from(message: UserMessage) -> Self {
+        Self::User(message)
+    }
+}
+
+impl From<AssistantMessage> for ConversationMessage {
+    fn from(message: AssistantMessage) -> Self {
+        Self::Assistant(message)
+    }
+}
+
+impl From<ToolResultMessage> for ConversationMessage {
+    fn from(message: ToolResultMessage) -> Self {
+        Self::ToolResult(message)
+    }
+}
+/*
+哪个工具调用？
+tool_call_id
+
+调用的是什么工具？
+tool_name
+
+工具返回了什么？
+content
+
+有没有额外内部数据？
+details
+
+工具是否消耗资源？
+usage
+
+是否新增工具？
+added_tool_names
+
+成功还是失败？
+is_error
+
+什么时候产生？
+timestamp
+
+*/

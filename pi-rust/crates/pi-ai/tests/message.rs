@@ -1,8 +1,8 @@
 use pi_ai::{
     AssistantContent, AssistantMessage, AssistantMessageDiagnostic, AssistantRole, DeferredHandle,
-    DiagnosticErrorCode, DiagnosticErrorInfo, ImageContent, StopReason, TextContent,
-    ThinkingContent, ToolCall, Usage, UsageCost, UserContent, UserMessage, UserMessageContent,
-    UserRole,
+    ConversationMessage, DiagnosticErrorCode, DiagnosticErrorInfo, ImageContent, StopReason,
+    TextContent, ThinkingContent, ToolCall, ToolResultContent, ToolResultMessage, ToolResultRole,
+    Usage, UsageCost, UserContent, UserMessage, UserMessageContent, UserRole,
 };
 use serde_json::{Map, Number, Value, json};
 
@@ -269,4 +269,171 @@ fn invalid_assistant_messages_are_rejected() {
     for value in [wrong_role, image_content, missing_usage] {
         assert!(serde_json::from_value::<AssistantMessage>(value).is_err());
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+struct ReadFileDetails {
+    path: String,
+    bytes: u64,
+}
+
+#[test]
+fn tool_result_message_matches_the_typescript_json_shape() {
+    let message = ToolResultMessage {
+        role: ToolResultRole::ToolResult,
+        tool_call_id: "call_1".to_owned(),
+        tool_name: "read_file".to_owned(),
+        content: vec![ToolResultContent::Text(TextContent {
+            text: "Hello, Pi".to_owned(),
+            text_signature: None,
+        })],
+        details: Some(ReadFileDetails {
+            path: "README.md".to_owned(),
+            bytes: 9,
+        }),
+        usage: None,
+        added_tool_names: None,
+        is_error: false,
+        timestamp: 1_700_000_000_123,
+    };
+
+    let expected = json!({
+        "role": "toolResult",
+        "toolCallId": "call_1",
+        "toolName": "read_file",
+        "content": [{ "type": "text", "text": "Hello, Pi" }],
+        "details": { "path": "README.md", "bytes": 9 },
+        "isError": false,
+        "timestamp": 1700000000123_u64
+    });
+
+    assert_eq!(serde_json::to_value(&message).unwrap(), expected);
+    assert_eq!(
+        serde_json::from_value::<ToolResultMessage<ReadFileDetails>>(expected).unwrap(),
+        message
+    );
+}
+
+#[test]
+fn tool_result_message_preserves_images_usage_and_added_tools() {
+    let message: ToolResultMessage = ToolResultMessage {
+        role: ToolResultRole::ToolResult,
+        tool_call_id: "call_2".to_owned(),
+        tool_name: "screenshot".to_owned(),
+        content: vec![ToolResultContent::Image(ImageContent {
+            data: "aGVsbG8=".to_owned(),
+            mime_type: "image/png".to_owned(),
+        })],
+        details: Some(json!({ "window": "terminal" })),
+        usage: Some(example_usage()),
+        added_tool_names: Some(vec!["inspect_image".to_owned()]),
+        is_error: true,
+        timestamp: 1_700_000_000_123,
+    };
+
+    let json = serde_json::to_value(&message).unwrap();
+    assert_eq!(json["content"][0]["type"], "image");
+    assert_eq!(json["usage"]["totalTokens"], 210);
+    assert_eq!(json["addedToolNames"][0], "inspect_image");
+    assert_eq!(
+        serde_json::from_value::<ToolResultMessage>(json).unwrap(),
+        message
+    );
+}
+
+#[test]
+fn invalid_tool_result_messages_are_rejected() {
+    let valid = json!({
+        "role": "toolResult",
+        "toolCallId": "call_1",
+        "toolName": "read_file",
+        "content": [{ "type": "text", "text": "ok" }],
+        "isError": false,
+        "timestamp": 0
+    });
+
+    let mut wrong_role = valid.clone();
+    wrong_role["role"] = json!("assistant");
+    let mut thinking_content = valid.clone();
+    thinking_content["content"] = json!([{ "type": "thinking", "thinking": "not a tool result" }]);
+    let mut missing_error_flag = valid;
+    missing_error_flag
+        .as_object_mut()
+        .unwrap()
+        .remove("isError");
+
+    for value in [wrong_role, thinking_content, missing_error_flag] {
+        assert!(serde_json::from_value::<ToolResultMessage>(value).is_err());
+    }
+}
+
+#[test]
+fn conversation_messages_preserve_roles_and_order() {
+    let messages = vec![
+        ConversationMessage::from(UserMessage {
+            role: UserRole::User,
+            content: UserMessageContent::Text("读取 README".to_owned()),
+            timestamp: 1,
+        }),
+        ConversationMessage::from(AssistantMessage {
+            role: AssistantRole::Assistant,
+            content: vec![AssistantContent::ToolCall(ToolCall {
+                id: "call_1".to_owned(),
+                name: "read_file".to_owned(),
+                arguments: Map::from_iter([(
+                    "path".to_owned(),
+                    Value::String("README.md".to_owned()),
+                )]),
+                thought_signature: None,
+                namespace: None,
+            })],
+            api: "faux".to_owned(),
+            provider: "faux".to_owned(),
+            model: "faux-1".to_owned(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            usage: example_usage(),
+            stop_reason: StopReason::ToolUse,
+            deferred: None,
+            error_message: None,
+            raw_stop_reason: None,
+            end_turn: Some(false),
+            timestamp: 2,
+        }),
+        ConversationMessage::from(ToolResultMessage {
+            role: ToolResultRole::ToolResult,
+            tool_call_id: "call_1".to_owned(),
+            tool_name: "read_file".to_owned(),
+            content: vec![ToolResultContent::Text(TextContent {
+                text: "README 内容".to_owned(),
+                text_signature: None,
+            })],
+            details: None,
+            usage: None,
+            added_tool_names: None,
+            is_error: false,
+            timestamp: 3,
+        }),
+    ];
+
+    let json = serde_json::to_value(&messages).unwrap();
+    assert_eq!(json[0]["role"], "user");
+    assert_eq!(json[1]["role"], "assistant");
+    assert_eq!(json[2]["role"], "toolResult");
+    assert_eq!(
+        serde_json::from_value::<Vec<ConversationMessage>>(json).unwrap(),
+        messages
+    );
+}
+
+#[test]
+fn invalid_conversation_messages_are_rejected() {
+    let unknown_role = json!({
+        "role": "system",
+        "content": "system messages are not implemented yet",
+        "timestamp": 0
+    });
+
+    assert!(serde_json::from_value::<ConversationMessage>(unknown_role).is_err());
 }

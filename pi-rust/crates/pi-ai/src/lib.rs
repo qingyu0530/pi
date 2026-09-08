@@ -11,8 +11,8 @@ pub use content::{
 };
 pub use message::{
     AssistantMessage, AssistantMessageDiagnostic, AssistantRole, DeferredHandle,
-    DiagnosticErrorCode, DiagnosticErrorInfo, StopReason, Usage, UsageCost, UserMessage,
-    UserMessageContent, UserRole,
+    ConversationMessage, DiagnosticErrorCode, DiagnosticErrorInfo, StopReason, ToolResultMessage,
+    ToolResultRole, Usage, UsageCost, UserMessage, UserMessageContent, UserRole,
 };
 
 /// The author of a conversation message.
