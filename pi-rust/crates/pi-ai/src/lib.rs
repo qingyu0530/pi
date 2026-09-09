@@ -16,6 +16,8 @@ mod cost;
 mod compat;
 // 模型目录
 mod model;
+// Provider 抽象
+mod provider;
 
 pub use compat::{
     AnthropicAllowedFallbackModel, BedrockCompat, CacheControlFormat, ChatTemplateKwargValue,
@@ -42,3 +44,4 @@ pub use message::{
 pub use model::{
     ImagesModel, InputType, Model, ModelCompat, ModelThinkingLevel, ThinkingLevel, ThinkingLevelMap,
 };
+pub use provider::{FauxProvider, Provider};
