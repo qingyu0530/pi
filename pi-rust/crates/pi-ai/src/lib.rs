@@ -4,11 +4,19 @@
 mod content;
 // 接入 pi-ai
 mod message;
+// 工具与上下文
+mod context;
+// 流式事件协议
+mod event;
 
 pub use content::{
     AssistantContent, ImageContent, TextContent, TextPhase, TextSignature, ThinkingContent,
     ToolCall, ToolResultContent, UserContent,
 };
+pub use context::{
+    ConstrainedSamplingConfig, Context, GrammarFormat, GrammarVariants, JsonSchemaStrict, Tool,
+};
+pub use event::AssistantMessageEvent;
 pub use message::{
     AssistantMessage, AssistantMessageDiagnostic, AssistantRole, DeferredHandle,
     ConversationMessage, DiagnosticErrorCode, DiagnosticErrorInfo, StopReason, ToolResultMessage,
