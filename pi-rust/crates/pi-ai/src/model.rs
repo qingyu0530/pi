@@ -66,13 +66,13 @@ pub enum InputType {
 #[serde(tag = "api")]
 pub enum ModelCompat {
     #[serde(rename = "openai-completions")]
-    OpenaiCompletions(OpenAICompletionsCompat),
+    OpenaiCompletions(Box<OpenAICompletionsCompat>),
     #[serde(rename = "openai-responses")]
-    OpenaiResponses(OpenAIResponsesCompat),
+    OpenaiResponses(Box<OpenAIResponsesCompat>),
     #[serde(rename = "anthropic-messages")]
-    AnthropicMessages(AnthropicMessagesCompat),
+    AnthropicMessages(Box<AnthropicMessagesCompat>),
     #[serde(rename = "bedrock-converse-stream")]
-    BedrockConverseStream(BedrockCompat),
+    BedrockConverseStream(Box<BedrockCompat>),
 }
 
 /// 统一模型系统中的模型描述。

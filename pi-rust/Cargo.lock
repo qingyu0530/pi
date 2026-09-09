@@ -19,6 +19,7 @@ name = "pi-agent-core"
 version = "0.1.0"
 dependencies = [
  "pi-ai",
+ "serde_json",
 ]
 
 [[package]]

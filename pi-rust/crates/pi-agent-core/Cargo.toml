@@ -10,5 +10,8 @@ repository.workspace = true
 [dependencies]
 pi-ai = { path = "../pi-ai" }
 
+[dev-dependencies]
+serde_json = { workspace = true }
+
 [lints]
 workspace = true

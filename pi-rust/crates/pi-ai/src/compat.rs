@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::cost::ModelCost;
 
-
 /// 用于 `chat_template_kwargs` / `chat_template_args` 的单个值。
 /// 原版：export type ChatTemplateKwargValue =
 ///   string | number | boolean | null | { $var: "thinking.enabled" | ...; omitWhenOff?: boolean }
@@ -42,7 +41,7 @@ pub struct ChatTemplateVar {
 
 /// 用于上限推理 token 的请求字段名。
 /// 思考 token 上限的请求字段名
-/// 
+///
 /// 原版：export type ThinkingTokenBudgetField = "thinking_token_budget" | "thinking_budget" | "thinking_budget_tokens";
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ThinkingTokenBudgetField {
@@ -115,7 +114,7 @@ Anthropic 不是随便哪个模型都能当回退目标。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AnthropicAllowedFallbackModel {
     /// 模型服务商。  回退模型的服务商（通常是 "anthropic"）
-    pub provider: String, 
+    pub provider: String,
     /// 模型id 。 如 "claude-3-5-haiku
     pub model: String,
     /// 该回退模型的价格
@@ -379,7 +378,10 @@ pub enum DataCollection {
 #[serde(untagged)]
 pub enum Sort {
     Name(String),
-    Spec { by: Option<String>, partition: Option<String> },
+    Spec {
+        by: Option<String>,
+        partition: Option<String>,
+    },
 }
 
 /// 每百万 token 的最高价格。

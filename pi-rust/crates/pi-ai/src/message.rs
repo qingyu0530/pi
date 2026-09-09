@@ -27,7 +27,7 @@ use crate::content::{AssistantContent, ToolResultContent, UserContent};
 use serde_json::{Map, Number, Value};
 
 /// 用户消息的固定角色。不能使用 Assistant 或 Tool 等其他角色。
-/// PartialEq	可以使用 == 和 !=
+/// PartialEq 可以使用 == 和 !=
 //  Eq	声明它具有完整的相等关系
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 // 只有一个变体
@@ -422,8 +422,8 @@ pub struct ToolResultMessage<TDetails = Value> {
 #[serde(untagged)]
 pub enum ConversationMessage {
     User(UserMessage),
-    Assistant(AssistantMessage),
-    ToolResult(ToolResultMessage),
+    Assistant(Box<AssistantMessage>),
+    ToolResult(Box<ToolResultMessage>),
 }
 
 impl From<UserMessage> for ConversationMessage {
@@ -434,13 +434,13 @@ impl From<UserMessage> for ConversationMessage {
 
 impl From<AssistantMessage> for ConversationMessage {
     fn from(message: AssistantMessage) -> Self {
-        Self::Assistant(message)
+        Self::Assistant(Box::new(message))
     }
 }
 
 impl From<ToolResultMessage> for ConversationMessage {
     fn from(message: ToolResultMessage) -> Self {
-        Self::ToolResult(message)
+        Self::ToolResult(Box::new(message))
     }
 }
 /*

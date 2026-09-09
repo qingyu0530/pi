@@ -49,7 +49,7 @@ fn chat_template_kwarg_value_supports_scalars_and_vars() {
         var: "thinking.enabled".to_owned(),
         omit_when_off: Some(true),
     };
-    let values = vec![
+    let values = [
         ChatTemplateKwargValue::String("你好".to_owned()),
         ChatTemplateKwargValue::Number(3.0),
         ChatTemplateKwargValue::Bool(true),
@@ -57,8 +57,10 @@ fn chat_template_kwarg_value_supports_scalars_and_vars() {
         ChatTemplateKwargValue::Var(var),
     ];
 
-    let serialized: Vec<serde_json::Value> =
-        values.iter().map(|v| serde_json::to_value(v).unwrap()).collect();
+    let serialized: Vec<serde_json::Value> = values
+        .iter()
+        .map(|v| serde_json::to_value(v).unwrap())
+        .collect();
 
     assert_eq!(
         serialized[0],
@@ -96,33 +98,35 @@ fn model_with_completions_compat_round_trips() {
         max_tokens: 16_384,
         sampling_params: None,
         headers: None,
-        compat: Some(ModelCompat::OpenaiCompletions(OpenAICompletionsCompat {
-            supports_store: Some(true),
-            supports_developer_role: Some(false),
-            supports_reasoning_effort: Some(true),
-            supports_usage_in_streaming: None,
-            supports_finish_reason: None,
-            max_tokens_field: Some(pi_ai::MaxTokensField::MaxCompletionTokens),
-            requires_tool_result_name: None,
-            requires_assistant_after_tool_result: None,
-            requires_thinking_as_text: None,
-            requires_reasoning_content_on_assistant_messages: None,
-            thinking_format: Some(ThinkingFormat::Openai),
-            chat_template_kwargs: None,
-            chat_template_args: None,
-            open_router_routing: None,
-            vercel_gateway_routing: None,
-            zai_tool_stream: None,
-            thinking_token_budget_field: Some(ThinkingTokenBudgetField::ThinkingTokenBudget),
-            supports_thinking_token_budget: None,
-            supports_openai_grammar_tools: None,
-            supports_strict_mode: None,
-            cache_control_format: None,
-            send_session_affinity_headers: None,
-            deferred_tools_mode: None,
-            session_affinity_format: None,
-            supports_long_cache_retention: None,
-        })),
+        compat: Some(ModelCompat::OpenaiCompletions(Box::new(
+            OpenAICompletionsCompat {
+                supports_store: Some(true),
+                supports_developer_role: Some(false),
+                supports_reasoning_effort: Some(true),
+                supports_usage_in_streaming: None,
+                supports_finish_reason: None,
+                max_tokens_field: Some(pi_ai::MaxTokensField::MaxCompletionTokens),
+                requires_tool_result_name: None,
+                requires_assistant_after_tool_result: None,
+                requires_thinking_as_text: None,
+                requires_reasoning_content_on_assistant_messages: None,
+                thinking_format: Some(ThinkingFormat::Openai),
+                chat_template_kwargs: None,
+                chat_template_args: None,
+                open_router_routing: None,
+                vercel_gateway_routing: None,
+                zai_tool_stream: None,
+                thinking_token_budget_field: Some(ThinkingTokenBudgetField::ThinkingTokenBudget),
+                supports_thinking_token_budget: None,
+                supports_openai_grammar_tools: None,
+                supports_strict_mode: None,
+                cache_control_format: None,
+                send_session_affinity_headers: None,
+                deferred_tools_mode: None,
+                session_affinity_format: None,
+                supports_long_cache_retention: None,
+            },
+        ))),
     };
 
     let expected = json!({

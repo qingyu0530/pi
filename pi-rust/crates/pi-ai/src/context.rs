@@ -63,13 +63,10 @@ pub enum ConstrainedSamplingConfig {
     },
     // 语法规则
     #[serde(rename = "grammar")]
-    Grammar {
-        variants: GrammarVariants,
-    },
+    Grammar { variants: GrammarVariants },
 }
 
 /// 一个可供模型调用的工具定义。
-
 /// TParameters 是工具参数的格式；原版用 typebox 的 TSchema，
 // 这里默认用任意 JSON 值 Value。
 /// 调用方若想强约束，可以换成自己的 schema 类型。

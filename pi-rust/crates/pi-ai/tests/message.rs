@@ -1,8 +1,8 @@
 use pi_ai::{
-    AssistantContent, AssistantMessage, AssistantMessageDiagnostic, AssistantRole, DeferredHandle,
-    ConversationMessage, DiagnosticErrorCode, DiagnosticErrorInfo, ImageContent, StopReason,
-    TextContent, ThinkingContent, ToolCall, ToolResultContent, ToolResultMessage, ToolResultRole,
-    Usage, UsageCost, UserContent, UserMessage, UserMessageContent, UserRole,
+    AssistantContent, AssistantMessage, AssistantMessageDiagnostic, AssistantRole,
+    ConversationMessage, DeferredHandle, DiagnosticErrorCode, DiagnosticErrorInfo, ImageContent,
+    StopReason, TextContent, ThinkingContent, ToolCall, ToolResultContent, ToolResultMessage,
+    ToolResultRole, Usage, UsageCost, UserContent, UserMessage, UserMessageContent, UserRole,
 };
 use serde_json::{Map, Number, Value, json};
 

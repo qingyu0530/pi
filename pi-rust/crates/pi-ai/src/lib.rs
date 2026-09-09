@@ -17,21 +17,6 @@ mod compat;
 // 模型目录
 mod model;
 
-pub use content::{
-    AssistantContent, ImageContent, TextContent, TextPhase, TextSignature, ThinkingContent,
-    ToolCall, ToolResultContent, UserContent,
-};
-pub use context::{
-    ConstrainedSamplingConfig, Context, GrammarFormat, GrammarVariants, JsonSchemaStrict, Tool,
-};
-pub use event::AssistantMessageEvent;
-pub use images::{AssistantImages, ImagesContext, ImagesStopReason};
-pub use message::{
-    AssistantMessage, AssistantMessageDiagnostic, AssistantRole, DeferredHandle,
-    ConversationMessage, DiagnosticErrorCode, DiagnosticErrorInfo, StopReason, ToolResultMessage,
-    ToolResultRole,     Usage, UsageCost, UserMessage, UserMessageContent, UserRole,
-};
-pub use cost::{ModelCost, ModelCostRates, ModelCostTier};
 pub use compat::{
     AnthropicAllowedFallbackModel, BedrockCompat, CacheControlFormat, ChatTemplateKwargValue,
     ChatTemplateVar, DataCollection, DeferredToolsMode, Latency, MaxPrice, MaxTokensField,
@@ -39,50 +24,21 @@ pub use compat::{
     SessionAffinityFormat, Sort, ThinkingFormat, ThinkingTokenBudgetField, Throughput,
     VercelGatewayRouting,
 };
-pub use model::{
-    ImagesModel, InputType, Model, ModelCompat, ModelThinkingLevel, ThinkingLevel,
-    ThinkingLevelMap,
+pub use content::{
+    AssistantContent, ImageContent, TextContent, TextPhase, TextSignature, ThinkingContent,
+    ToolCall, ToolResultContent, UserContent,
 };
-
-/// The author of a conversation message.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Role {
-    System,
-    User,
-    Assistant,
-    Tool,
-}
-
-/// A text message in an agent conversation.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Message {
-    pub role: Role,
-    pub content: String,
-}
-
-impl Message {
-    #[must_use]
-    pub fn new(role: Role, content: impl Into<String>) -> Self {
-        Self {
-            role,
-            content: content.into(),
-        }
-    }
-}
-
-/// Identifies a model exposed by a provider.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ModelId {
-    pub provider: String,
-    pub model: String,
-}
-
-impl ModelId {
-    #[must_use]
-    pub fn new(provider: impl Into<String>, model: impl Into<String>) -> Self {
-        Self {
-            provider: provider.into(),
-            model: model.into(),
-        }
-    }
-}
+pub use context::{
+    ConstrainedSamplingConfig, Context, GrammarFormat, GrammarVariants, JsonSchemaStrict, Tool,
+};
+pub use cost::{ModelCost, ModelCostRates, ModelCostTier};
+pub use event::AssistantMessageEvent;
+pub use images::{AssistantImages, ImagesContext, ImagesStopReason};
+pub use message::{
+    AssistantMessage, AssistantMessageDiagnostic, AssistantRole, ConversationMessage,
+    DeferredHandle, DiagnosticErrorCode, DiagnosticErrorInfo, StopReason, ToolResultMessage,
+    ToolResultRole, Usage, UsageCost, UserMessage, UserMessageContent, UserRole,
+};
+pub use model::{
+    ImagesModel, InputType, Model, ModelCompat, ModelThinkingLevel, ThinkingLevel, ThinkingLevelMap,
+};
