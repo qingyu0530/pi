@@ -10,6 +10,12 @@ mod context;
 mod event;
 // 图片生成
 mod images;
+// 模型成本
+mod cost;
+// 兼容配置与路由
+mod compat;
+// 模型目录
+mod model;
 
 pub use content::{
     AssistantContent, ImageContent, TextContent, TextPhase, TextSignature, ThinkingContent,
@@ -23,7 +29,19 @@ pub use images::{AssistantImages, ImagesContext, ImagesStopReason};
 pub use message::{
     AssistantMessage, AssistantMessageDiagnostic, AssistantRole, DeferredHandle,
     ConversationMessage, DiagnosticErrorCode, DiagnosticErrorInfo, StopReason, ToolResultMessage,
-    ToolResultRole, Usage, UsageCost, UserMessage, UserMessageContent, UserRole,
+    ToolResultRole,     Usage, UsageCost, UserMessage, UserMessageContent, UserRole,
+};
+pub use cost::{ModelCost, ModelCostRates, ModelCostTier};
+pub use compat::{
+    AnthropicAllowedFallbackModel, BedrockCompat, CacheControlFormat, ChatTemplateKwargValue,
+    ChatTemplateVar, DataCollection, DeferredToolsMode, Latency, MaxPrice, MaxTokensField,
+    OpenAICompletionsCompat, OpenAIResponsesCompat, OpenRouterRouting, Percentiles, PriceValue,
+    SessionAffinityFormat, Sort, ThinkingFormat, ThinkingTokenBudgetField, Throughput,
+    VercelGatewayRouting,
+};
+pub use model::{
+    ImagesModel, InputType, Model, ModelCompat, ModelThinkingLevel, ThinkingLevel,
+    ThinkingLevelMap,
 };
 
 /// The author of a conversation message.
