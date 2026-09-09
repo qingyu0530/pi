@@ -8,6 +8,8 @@ mod message;
 mod context;
 // 流式事件协议
 mod event;
+// 图片生成
+mod images;
 
 pub use content::{
     AssistantContent, ImageContent, TextContent, TextPhase, TextSignature, ThinkingContent,
@@ -17,6 +19,7 @@ pub use context::{
     ConstrainedSamplingConfig, Context, GrammarFormat, GrammarVariants, JsonSchemaStrict, Tool,
 };
 pub use event::AssistantMessageEvent;
+pub use images::{AssistantImages, ImagesContext, ImagesStopReason};
 pub use message::{
     AssistantMessage, AssistantMessageDiagnostic, AssistantRole, DeferredHandle,
     ConversationMessage, DiagnosticErrorCode, DiagnosticErrorInfo, StopReason, ToolResultMessage,
