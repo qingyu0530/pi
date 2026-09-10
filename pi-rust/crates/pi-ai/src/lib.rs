@@ -1,4 +1,6 @@
 //! Model and conversation types shared by Pi providers.
+// API 协议层：某个线上 API 的请求/响应 JSON 形状
+pub mod api;
 // 声明 content 模块
 // 因此编译器会加载同一目录下的 content.rs
 mod content;
