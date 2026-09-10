@@ -17,7 +17,7 @@ mod truncate;
 pub use environment::{EnvError, Environment, RealEnvironment};
 pub use event::AgentEvent;
 pub use tool::{AgentTool, EchoTool, ToolError, ToolResult};
-pub use tools::{ReadTool, WriteTool};
+pub use tools::{EditTool, ReadTool, WriteTool};
 
 use pi_ai::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, Context, ConversationMessage, Model,

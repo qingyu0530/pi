@@ -11,7 +11,8 @@ use crate::truncate::{DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncate_head};
 ///
 /// 它持有一个 `Box<dyn Environment>`，通过环境读取文件，
 /// 而不是直接调用 `std::fs`，方便测试替换。
-pub struct ReadTool { // 工具结构体
+pub struct ReadTool {
+    // 工具结构体
     env: Box<dyn Environment>,
     max_lines: usize, // 该工具实例的截断上限（可定制）。
     max_bytes: usize,
@@ -29,7 +30,8 @@ impl ReadTool {
     }
 }
 
-impl AgentTool for ReadTool { // 告诉 Agent：这个工具叫 read。模型发起的 ToolCall.name == "read" 就会命中它。
+impl AgentTool for ReadTool {
+    // 告诉 Agent：这个工具叫 read。模型发起的 ToolCall.name == "read" 就会命中它。
     fn name(&self) -> &str {
         "read"
     }
@@ -55,7 +57,7 @@ impl AgentTool for ReadTool { // 告诉 Agent：这个工具叫 read。模型发
     }
     // 接收模型发起的工具调用 call（含 id、name、arguments），返回结果或错误
     fn execute(&self, call: &ToolCall) -> Result<ToolResult, ToolError> {
-        let path = call  // 取必填参数 path
+        let path = call // 取必填参数 path
             .arguments // 参数 map
             .get("path") // 查 path，得到 Option<&Value
             .and_then(Value::as_str)

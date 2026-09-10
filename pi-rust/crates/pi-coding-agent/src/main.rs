@@ -1,6 +1,6 @@
 use std::io;
 
-use pi_agent_core::{Agent, AgentEvent, EchoTool, ReadTool, RealEnvironment, WriteTool};
+use pi_agent_core::{Agent, AgentEvent, EchoTool, EditTool, ReadTool, RealEnvironment, WriteTool};
 use pi_ai::{
     FauxProvider, FauxResponse, InputType, Model, ModelCost, ModelCostRates, UserMessage,
     UserMessageContent, UserRole,
@@ -53,6 +53,7 @@ fn main() -> io::Result<()> {
     agent.add_tool(Box::new(EchoTool));
     agent.add_tool(Box::new(ReadTool::new(Box::new(RealEnvironment))));
     agent.add_tool(Box::new(WriteTool::new(Box::new(RealEnvironment))));
+    agent.add_tool(Box::new(EditTool::new(Box::new(RealEnvironment))));
     agent.add_message(UserMessage {
         role: UserRole::User,
         content: UserMessageContent::Text("请读取 Cargo.toml".to_owned()),

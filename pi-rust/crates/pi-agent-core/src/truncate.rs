@@ -53,7 +53,8 @@ pub fn truncate_head(content: &str, max_lines: usize, max_bytes: usize) -> Trunc
             break;
         }
         let separator = usize::from(!selected.is_empty()); // 除第一行外，每行前面还有一个换行符。
-        if byte_count + separator + line.len() > max_bytes { // 已用字节 + 分隔符 + 本行字节」超过 max_bytes，标记「因字节截断」并跳出。
+        if byte_count + separator + line.len() > max_bytes {
+            // 已用字节 + 分隔符 + 本行字节」超过 max_bytes，标记「因字节截断」并跳出。
             truncated_by = Some(TruncatedBy::Bytes);
             break;
         }
