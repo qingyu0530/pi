@@ -8,15 +8,17 @@
 //!   Agent 持有 Box<dyn Provider> ≈ 持有一个抽象基类指针，
 //!   运行时才决定具体用哪个子类（FauxProvider 或真实 Provider）。
 
+mod event;
 mod tool;
 
+pub use event::AgentEvent;
 pub use tool::{AgentTool, EchoTool, ToolError, ToolResult};
 
 use pi_ai::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, Context, ConversationMessage, Model,
-    Provider, StopReason, TextContent, ToolCall, ToolResultContent, ToolResultMessage,
-    ToolResultRole,
+    Provider, StopReason, ToolCall, ToolResultMessage, ToolResultRole,
 };
+use serde_json::Value;
 
 /// 单次 `run` 允许的最大轮数，防止 Provider 一直返回工具调用导致死循环。
 const MAX_TURNS: usize = 32;
@@ -87,8 +89,16 @@ impl Agent {
 
     /// 单轮对话：把当前消息发给模型，收集流式事件，返回并追加最终的助手消息。
     ///
-    /// 目前只处理一次请求，不执行工具；工具循环会在后续步骤加入。
-    pub fn run_once(&mut self) -> Result<AssistantMessage, AgentError> {
+    /// 过程中会向 `sink` 发出消息级事件：
+    /// - `Start` -> `MessageStart`   助手消息开始（收到 Start 时）
+    /// - 各种 start/delta/end -> `MessageUpdate`  流式中间更新（text/thinking/toolcall 的 start/delta/end）
+    /// - `Done`/`Error` -> `MessageEnd`  消息结束（拿到最终 Done/Error 后）
+    /// 
+    /// C++ 对照：`sink` 是一个回调函数对象（`std::function<void(AgentEvent)>`）。
+    pub fn run_once(
+        &mut self,
+        sink: &mut dyn FnMut(AgentEvent),
+    ) -> Result<AssistantMessage, AgentError> {
         // 把 Agent 的当前状态组装成一次请求的输入。
         let context = Context {
             system_prompt: self.system_prompt.clone(),
@@ -96,21 +106,36 @@ impl Agent {
             tools: self.tool_definitions(),
         };
 
-        // Provider::stream 返回一串事件。我们只关心最后的 done/error，
-        // 它携带了完整组装好的 AssistantMessage。
-        // 中间的 text_delta 等事件在后续接入 UI 时才会用到。
         let mut final_message = None;
         for event in self.provider.stream(&self.model, &context) {
-            match event {
+            match &event {
+                // 流开始：对应一条助手消息开始。
+                AssistantMessageEvent::Start { partial } => {
+                    sink(AgentEvent::MessageStart {
+                        message: Box::new(partial.clone().into()),
+                    });
+                }
+                // done/error 携带最终消息。
                 AssistantMessageEvent::Done { message, .. }
                 | AssistantMessageEvent::Error { error: message, .. } => {
-                    final_message = Some(message);
+                    final_message = Some(message.clone());
                 }
-                _ => {}
+                // 其余都是携带 partial 的中间事件：转发给 UI。
+                other => {
+                    if let Some(partial) = other.partial() {
+                        sink(AgentEvent::MessageUpdate {
+                            message: Box::new(partial.clone()),
+                            event: Box::new(other.clone()),
+                        });
+                    }
+                }
             }
         }
 
         let message = final_message.ok_or(AgentError::IncompleteStream)?;
+        sink(AgentEvent::MessageEnd {
+            message: Box::new(message.clone().into()),
+        });
         self.messages.push(message.clone().into());
         Ok(message)
     }
@@ -118,13 +143,40 @@ impl Agent {
     /// 完整对话循环：反复「请求模型 → 执行工具 → 再请求」，
     /// 直到助手不再发起工具调用（或出错/中止），返回最后一条助手消息。
     ///
+    /// 过程中会发出 run 级和 turn 级事件。
     /// C++ 对照：类似一个 while 循环，条件由每轮模型的输出决定。
-    pub fn run(&mut self) -> Result<AssistantMessage, AgentError> {
-        for _ in 0..MAX_TURNS {
-            let message = self.run_once()?;
+    ///
+    /// 拆出 `run_loop` 是为了保证 `agent_end` 一定发出（成功、出错、超限都发），
+    /// 让 UI 能正确收尾。
+    pub fn run(
+        &mut self,
+        sink: &mut dyn FnMut(AgentEvent),
+    ) -> Result<AssistantMessage, AgentError> {
+        // run 只做两件事：发开头、发结尾，中间交给 run_loop
+        sink(AgentEvent::AgentStart);
+        let result = self.run_loop(sink); // 内部循环
+        // 无论成功失败，都发出 agent_end，让 UI 知道运行结束。
+        sink(AgentEvent::AgentEnd {
+            messages: self.messages.clone(),
+        });
+        result
+    }
 
-            // 模型出错或被中止：不再继续。
+    /// `run` 的内部循环，单独抽出来是为了让 `agent_end` 总能发出。
+    fn run_loop(
+        &mut self,
+        sink: &mut dyn FnMut(AgentEvent),
+    ) -> Result<AssistantMessage, AgentError> {
+        for _ in 0..MAX_TURNS {
+            sink(AgentEvent::TurnStart);
+            let message = self.run_once(sink)?;
+
+            // 模型出错或被中止：本轮结束，不再继续。
             if matches!(message.stop_reason, StopReason::Error | StopReason::Aborted) {
+                sink(AgentEvent::TurnEnd {
+                    message: Box::new(message.clone()),
+                    tool_results: Vec::new(),
+                });
                 return Ok(message);
             }
 
@@ -134,22 +186,57 @@ impl Agent {
                 .iter()
                 .any(|block| matches!(block, AssistantContent::ToolCall(_)));
             if !has_tool_calls {
+                sink(AgentEvent::TurnEnd {
+                    message: Box::new(message.clone()),
+                    tool_results: Vec::new(),
+                });
                 return Ok(message);
             }
 
             // 执行工具，把结果追加进对话，然后进入下一轮请求。
-            self.execute_tool_calls(&message);
+            let tool_results = self.execute_tool_calls(&message, sink);
+            sink(AgentEvent::TurnEnd {
+                message: Box::new(message.clone()),
+                tool_results,
+            });
         }
 
         Err(AgentError::MaxTurnsExceeded { limit: MAX_TURNS })
     }
 
     /// 执行助手消息里的所有工具调用，追加对应的工具结果消息并返回它们。
-    pub fn execute_tool_calls(&mut self, message: &AssistantMessage) -> Vec<ToolResultMessage> {
+    ///
+    /// 每个工具调用会发出 `ToolExecutionStart` / `ToolExecutionEnd`，
+    /// 工具结果本身作为一条消息发出 `MessageStart` / `MessageEnd`。
+    pub fn execute_tool_calls(
+        &mut self,
+        message: &AssistantMessage,
+        sink: &mut dyn FnMut(AgentEvent),
+    ) -> Vec<ToolResultMessage> {
         let mut results = Vec::new();
         for block in &message.content {
             if let AssistantContent::ToolCall(call) = block {
-                let result_message = self.execute_one(call);
+                sink(AgentEvent::ToolExecutionStart {
+                    tool_call_id: call.id.clone(),
+                    tool_name: call.name.clone(),
+                    args: Value::Object(call.arguments.clone()),
+                });
+
+                let (result, is_error) = self.execute_one(call);
+                sink(AgentEvent::ToolExecutionEnd {
+                    tool_call_id: call.id.clone(),
+                    tool_name: call.name.clone(),
+                    result: Box::new(result.clone()),
+                    is_error,
+                });
+
+                let result_message = tool_result_message(call, result, is_error);
+                sink(AgentEvent::MessageStart {
+                    message: Box::new(result_message.clone().into()),
+                });
+                sink(AgentEvent::MessageEnd {
+                    message: Box::new(result_message.clone().into()),
+                });
                 self.messages.push(result_message.clone().into());
                 results.push(result_message);
             }
@@ -157,46 +244,17 @@ impl Agent {
         results
     }
 
-    /// 执行单个工具调用，返回一条工具结果消息。
+    /// 执行单个工具调用，返回工具结果和是否失败。
     ///
-    /// 工具不存在或执行失败时，生成一条 `is_error = true` 的结果消息，
-    /// 而不是中断整个流程，这样模型能看到错误并自行调整。
-    fn execute_one(&self, call: &ToolCall) -> ToolResultMessage {
-        let outcome = match self.find_tool(&call.name) {
-            Some(tool) => tool.execute(call),
-            None => Err(ToolError::new(format!("未知工具: {}", call.name))),
-        };
-
-        let (content, details, usage, added_tool_names, is_error) = match outcome {
-            Ok(result) => (
-                result.content,
-                result.details,
-                result.usage,
-                result.added_tool_names,
-                false,
-            ),
-            Err(error) => (
-                vec![ToolResultContent::Text(TextContent {
-                    text: error.message,
-                    text_signature: None,
-                })],
-                None,
-                None,
-                None,
-                true,
-            ),
-        };
-
-        ToolResultMessage {
-            role: ToolResultRole::ToolResult,
-            tool_call_id: call.id.clone(),
-            tool_name: call.name.clone(),
-            content,
-            details,
-            usage,
-            added_tool_names,
-            is_error,
-            timestamp: 0,
+    /// 工具不存在或执行失败时返回一条错误文本结果，而不是中断整个流程，
+    /// 这样模型能看到错误并自行调整。
+    fn execute_one(&self, call: &ToolCall) -> (ToolResult, bool) {
+        match self.find_tool(&call.name) {
+            Some(tool) => match tool.execute(call) {
+                Ok(result) => (result, false),
+                Err(error) => (ToolResult::text(error.message), true),
+            },
+            None => (ToolResult::text(format!("未知工具: {}", call.name)), true),
         }
     }
 
@@ -227,9 +285,24 @@ impl Agent {
     }
 }
 
+/// 把一次工具执行的结果组装成工具结果消息。
+fn tool_result_message(call: &ToolCall, result: ToolResult, is_error: bool) -> ToolResultMessage {
+    ToolResultMessage {
+        role: ToolResultRole::ToolResult,
+        tool_call_id: call.id.clone(),
+        tool_name: call.name.clone(),
+        content: result.content,
+        details: result.details,
+        usage: result.usage,
+        added_tool_names: result.added_tool_names,
+        is_error,
+        timestamp: 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Agent, AgentError};
+    use super::{Agent, AgentError, AgentEvent};
     use pi_ai::{
         AssistantContent, AssistantMessage, AssistantMessageEvent, AssistantRole, Context,
         ConversationMessage, FauxProvider, FauxResponse, InputType, Model, ModelCost,
@@ -391,7 +464,7 @@ mod tests {
         );
         agent.add_message(user_message("你好"));
 
-        let message = agent.run_once().unwrap();
+        let message = agent.run_once(&mut |_| {}).unwrap();
 
         assert_eq!(message.stop_reason, StopReason::Stop);
         assert_eq!(agent.messages().len(), 2);
@@ -411,7 +484,10 @@ mod tests {
         let mut agent = Agent::new(Box::new(EmptyProvider), faux_model());
         agent.add_message(user_message("hi"));
 
-        assert_eq!(agent.run_once(), Err(AgentError::IncompleteStream));
+        assert_eq!(
+            agent.run_once(&mut |_| {}),
+            Err(AgentError::IncompleteStream)
+        );
     }
 
     #[test]
@@ -424,7 +500,7 @@ mod tests {
             "echo",
             arguments(serde_json::json!({ "text": "hi" })),
         );
-        let results = agent.execute_tool_calls(&message);
+        let results = agent.execute_tool_calls(&message, &mut |_| {});
 
         assert_eq!(results.len(), 1);
         assert!(!results[0].is_error);
@@ -447,7 +523,7 @@ mod tests {
         let mut agent = Agent::new(Box::new(FauxProvider::new(vec![])), faux_model());
 
         let message = tool_call_message("call_1", "missing", Map::new());
-        let results = agent.execute_tool_calls(&message);
+        let results = agent.execute_tool_calls(&message, &mut |_| {});
 
         assert_eq!(results.len(), 1);
         assert!(results[0].is_error);
@@ -472,7 +548,7 @@ mod tests {
         agent.add_tool(Box::new(super::EchoTool));
         agent.add_message(user_message("echo hi"));
 
-        let final_message = agent.run().unwrap();
+        let final_message = agent.run(&mut |_| {}).unwrap();
 
         assert_eq!(final_message.stop_reason, StopReason::Stop);
         // user -> assistant(工具调用) -> toolResult -> assistant(最终文本)
@@ -492,13 +568,68 @@ mod tests {
     }
 
     #[test]
+    fn run_emits_turn_and_message_events() {
+        let script = vec![
+            FauxResponse::tool_call(
+                "call_1",
+                "echo",
+                arguments(serde_json::json!({ "text": "hi" })),
+            ),
+            FauxResponse::Text("done".to_owned()),
+        ];
+        let provider = FauxProvider::with_script(vec![faux_model()], script);
+        let mut agent = Agent::new(Box::new(provider), faux_model());
+        agent.add_tool(Box::new(super::EchoTool));
+        agent.add_message(user_message("echo hi"));
+
+        let mut events = Vec::new();
+        agent.run(&mut |event| events.push(event)).unwrap();
+
+        // run 级事件：首尾分别是 agent_start 和 agent_end。
+        assert!(matches!(events.first(), Some(AgentEvent::AgentStart)));
+        assert!(matches!(events.last(), Some(AgentEvent::AgentEnd { .. })));
+        // 两个 turn（一次工具调用轮 + 一次最终文本轮）。
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::TurnStart))
+                .count(),
+            2
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::TurnEnd { .. }))
+                .count(),
+            2
+        );
+        // 工具执行事件。
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ToolExecutionStart { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ToolExecutionEnd { .. }))
+        );
+        // 流式消息更新事件。
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::MessageUpdate { .. }))
+        );
+    }
+
+    #[test]
     fn run_stops_at_max_turns() {
         let mut agent = Agent::new(Box::new(AlwaysToolProvider), faux_model());
         agent.add_tool(Box::new(super::EchoTool));
         agent.add_message(user_message("loop forever"));
 
         assert!(matches!(
-            agent.run(),
+            agent.run(&mut |_| {}),
             Err(AgentError::MaxTurnsExceeded { .. })
         ));
     }

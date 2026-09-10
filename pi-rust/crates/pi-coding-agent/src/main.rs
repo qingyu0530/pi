@@ -1,6 +1,6 @@
 use std::io;
 
-use pi_agent_core::{Agent, EchoTool};
+use pi_agent_core::{Agent, AgentEvent, EchoTool};
 use pi_ai::{
     FauxProvider, FauxResponse, InputType, Model, ModelCost, ModelCostRates, UserMessage,
     UserMessageContent, UserRole,
@@ -58,7 +58,16 @@ fn main() -> io::Result<()> {
     });
 
     let reply = agent
-        .run()
+        .run(&mut |event| {
+            if let AgentEvent::ToolExecutionEnd {
+                tool_name,
+                is_error,
+                ..
+            } = &event
+            {
+                println!("[tool {tool_name} finished, is_error={is_error}]");
+            }
+        })
         .map_err(|error| io::Error::other(format!("{error:?}")))?;
 
     let mut renderer = PlainRenderer;

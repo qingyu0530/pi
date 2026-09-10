@@ -132,3 +132,28 @@ pub enum AssistantMessageEvent {
         error: AssistantMessage,
     },
 }
+
+impl AssistantMessageEvent {
+    /// 事件携带的“到目前为止的部分助手消息”。
+    ///
+    /// start 以及各种 start/delta/end 事件都携带 partial；
+    /// done 和 error 携带的是最终消息，不是 partial，所以返回 None。
+    ///
+    /// C++ 对照：类似从 `std::variant` 里统一取出某个公共字段的访问器。
+    #[must_use]
+    pub fn partial(&self) -> Option<&AssistantMessage> {
+        match self {
+            Self::Start { partial }
+            | Self::TextStart { partial, .. }
+            | Self::TextDelta { partial, .. }
+            | Self::TextEnd { partial, .. }
+            | Self::ThinkingStart { partial, .. }
+            | Self::ThinkingDelta { partial, .. }
+            | Self::ThinkingEnd { partial, .. }
+            | Self::ToolcallStart { partial, .. }
+            | Self::ToolcallDelta { partial, .. }
+            | Self::ToolcallEnd { partial, .. } => Some(partial),
+            Self::Done { .. } | Self::Error { .. } => None,
+        }
+    }
+}
