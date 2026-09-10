@@ -27,7 +27,8 @@ impl EditTool {
 }
 
 impl AgentTool for EditTool {
-    fn name(&self) -> &str { // 工具名
+    fn name(&self) -> &str {
+        // 工具名
         "edit"
     }
     // 给模型看的说明。
@@ -69,8 +70,6 @@ impl AgentTool for EditTool {
             .get("edits") // 取 edits（这里先只取到 &Value，还没解析），缺失就报错。
             .ok_or_else(|| ToolError::new("缺少参数 edits"))?;
 
-
-
         let edits = parse_edits(edits_value)?; // 调用解析、读写、返回
         let content = self // 读文件
             .env
@@ -92,7 +91,8 @@ fn parse_edits(value: &Value) -> Result<Vec<Replacement>, ToolError> {
     let array = value
         .as_array() // 要求是数组，否则报错。
         .ok_or_else(|| ToolError::new("edits 必须是数组"))?;
-    if array.is_empty() { // 空数组也报错
+    if array.is_empty() {
+        // 空数组也报错
         return Err(ToolError::new("edits 至少要有一项"));
     }
 
@@ -120,7 +120,6 @@ fn parse_edits(value: &Value) -> Result<Vec<Replacement>, ToolError> {
 /// - 每个 `old_text` 必须在**原文**中恰好出现一次（唯一）。
 /// - 各替换区域不能重叠。
 /// - 从后往前替换，避免前面的替换改变后面区域的字节下标。
-
 // apply_edits 先在原文里为每个 oldText 定位（要求唯一），
 // 把替换区间记下、排序、检查不重叠，然后从后往前逐段替换
 fn apply_edits(content: &str, edits: &[Replacement]) -> Result<String, ToolError> {
@@ -131,7 +130,8 @@ fn apply_edits(content: &str, edits: &[Replacement]) -> Result<String, ToolError
         let first = matches // 取第一个匹配；一个都没有 → 报「未找到」
             .next()
             .ok_or_else(|| ToolError::new(format!("未找到 oldText:\n{}", edit.old_text)))?;
-        if matches.next().is_some() { // 再取第二个；还有 → 说明出现多次，报「不唯一」。（is_some() 是「还有下一个」）
+        if matches.next().is_some() {
+            // 再取第二个；还有 → 说明出现多次，报「不唯一」。（is_some() 是「还有下一个」）
             return Err(ToolError::new(format!(
                 "oldText 不唯一（出现多次）:\n{}",
                 edit.old_text
@@ -154,7 +154,8 @@ fn apply_edits(content: &str, edits: &[Replacement]) -> Result<String, ToolError
 
     // 从后往前替换，这样前面的下标不受影响。
     let mut result = content.to_owned(); // 复制原文成可变的 result
-    for (start, end, new_text) in spans.into_iter().rev() { // 从后往前遍历替换
+    for (start, end, new_text) in spans.into_iter().rev() {
+        // 从后往前遍历替换
         // 为什么要从后往前：替换会改变后面文本的下标；先改后面的，前面的下标就不会被影响。
         result.replace_range(start..end, new_text);
     }
