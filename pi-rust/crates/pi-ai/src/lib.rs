@@ -44,6 +44,7 @@ pub use message::{
     ToolResultRole, Usage, UsageCost, UserMessage, UserMessageContent, UserRole,
 };
 pub use model::{
-    ImagesModel, InputType, Model, ModelCompat, ModelThinkingLevel, ThinkingLevel, ThinkingLevelMap,
+    ImagesModel, InputType, Model, ModelCompat, ModelThinkingLevel, ThinkingLevel,
+    ThinkingLevelMap, calculate_cost,
 };
 pub use provider::{FauxProvider, FauxResponse, Provider};

@@ -1,9 +1,12 @@
-use pi_ai::api::openai_completions::{ChatMessage, build_request, convert_messages};
+use pi_ai::api::openai_completions::{
+    ChatCompletionChunk, ChatMessage, ChunkUsage, CompletionTokensDetails, PromptTokensDetails,
+    build_request, convert_messages, map_stop_reason, parse_usage,
+};
 use pi_ai::{
     AssistantContent, AssistantMessage, AssistantRole, Context, ConversationMessage, ImageContent,
-    InputType, Model, ModelCost, ModelCostRates, StopReason, TextContent, Tool, ToolCall,
-    ToolResultContent, ToolResultMessage, ToolResultRole, Usage, UsageCost, UserContent,
-    UserMessage, UserMessageContent, UserRole,
+    InputType, Model, ModelCost, ModelCostRates, ModelCostTier, StopReason, TextContent, Tool,
+    ToolCall, ToolResultContent, ToolResultMessage, ToolResultRole, Usage, UsageCost, UserContent,
+    UserMessage, UserMessageContent, UserRole, calculate_cost,
 };
 use serde_json::json;
 
@@ -250,4 +253,191 @@ fn tools_are_serialized_as_function_tools() {
             }
         }])
     );
+}
+
+fn priced_model() -> Model {
+    let mut model = model();
+    model.cost = ModelCost {
+        rates: ModelCostRates {
+            input: 3.0,
+            output: 15.0,
+            cache_read: 0.3,
+            cache_write: 3.75,
+        },
+        tiers: None,
+    };
+    model
+}
+
+#[test]
+fn chunk_deserializes_text_delta() {
+    let chunk: ChatCompletionChunk = serde_json::from_value(json!({
+        "id": "chatcmpl-1",
+        "model": "gpt-4o-mini",
+        "choices": [{
+            "index": 0,
+            "delta": { "role": "assistant", "content": "你好" },
+            "finish_reason": null
+        }]
+    }))
+    .unwrap();
+
+    assert_eq!(chunk.id.as_deref(), Some("chatcmpl-1"));
+    assert_eq!(chunk.model.as_deref(), Some("gpt-4o-mini"));
+    let choice = &chunk.choices[0];
+    assert_eq!(choice.finish_reason, None);
+    let delta = choice.delta.as_ref().unwrap();
+    assert_eq!(delta.role.as_deref(), Some("assistant"));
+    assert_eq!(delta.content.as_deref(), Some("你好"));
+}
+
+#[test]
+fn chunk_deserializes_tool_call_fragments() {
+    let chunk: ChatCompletionChunk = serde_json::from_value(json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_1",
+                    "type": "function",
+                    "function": { "name": "read", "arguments": "{\"path\"" }
+                }]
+            }
+        }]
+    }))
+    .unwrap();
+
+    let call = &chunk.choices[0]
+        .delta
+        .as_ref()
+        .unwrap()
+        .tool_calls
+        .as_ref()
+        .unwrap()[0];
+    assert_eq!(call.index, 0);
+    assert_eq!(call.id.as_deref(), Some("call_1"));
+    assert_eq!(
+        call.function.as_ref().unwrap().name.as_deref(),
+        Some("read")
+    );
+    assert_eq!(
+        call.function.as_ref().unwrap().arguments.as_deref(),
+        Some("{\"path\"")
+    );
+}
+
+#[test]
+fn chunk_deserializes_usage_details() {
+    let chunk: ChatCompletionChunk = serde_json::from_value(json!({
+        "choices": [],
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "prompt_tokens_details": { "cached_tokens": 40, "cache_write_tokens": 10 },
+            "completion_tokens_details": { "reasoning_tokens": 5 }
+        }
+    }))
+    .unwrap();
+
+    let usage = chunk.usage.unwrap();
+    assert_eq!(usage.prompt_tokens, 100);
+    assert_eq!(usage.completion_tokens, 20);
+    assert_eq!(
+        usage.prompt_tokens_details.as_ref().unwrap().cached_tokens,
+        Some(40)
+    );
+    assert_eq!(
+        usage
+            .completion_tokens_details
+            .as_ref()
+            .unwrap()
+            .reasoning_tokens,
+        Some(5)
+    );
+}
+
+#[test]
+fn map_stop_reason_maps_known_reasons() {
+    assert_eq!(map_stop_reason(None), (StopReason::Stop, None));
+    assert_eq!(map_stop_reason(Some("stop")), (StopReason::Stop, None));
+    assert_eq!(map_stop_reason(Some("length")), (StopReason::Length, None));
+    assert_eq!(
+        map_stop_reason(Some("tool_calls")),
+        (StopReason::ToolUse, None)
+    );
+
+    let (reason, error) = map_stop_reason(Some("content_filter"));
+    assert_eq!(reason, StopReason::Error);
+    assert!(error.unwrap().contains("content_filter"));
+}
+
+#[test]
+fn parse_usage_computes_input_and_cost() {
+    let raw = ChunkUsage {
+        prompt_tokens: 1_000,
+        completion_tokens: 100,
+        prompt_tokens_details: Some(PromptTokensDetails {
+            cached_tokens: Some(200),
+            cache_write_tokens: Some(100),
+        }),
+        completion_tokens_details: Some(CompletionTokensDetails {
+            reasoning_tokens: Some(30),
+        }),
+        ..ChunkUsage::default()
+    };
+
+    let usage = parse_usage(&raw, &priced_model());
+
+    assert_eq!(usage.input, 700);
+    assert_eq!(usage.output, 100);
+    assert_eq!(usage.cache_read, 200);
+    assert_eq!(usage.cache_write, 100);
+    assert_eq!(usage.total_tokens, 1_100);
+    assert_eq!(usage.reasoning, Some(30));
+    assert!((usage.cost.input - 0.0021).abs() < 1e-12);
+    assert!((usage.cost.output - 0.0015).abs() < 1e-12);
+    assert!((usage.cost.cache_read - 0.000_06).abs() < 1e-12);
+    assert!((usage.cost.cache_write - 0.000_375).abs() < 1e-12);
+    assert!((usage.cost.total - (0.0021 + 0.0015 + 0.000_06 + 0.000_375)).abs() < 1e-12);
+}
+
+#[test]
+fn parse_usage_falls_back_to_top_level_cache_fields() {
+    let raw = ChunkUsage {
+        prompt_tokens: 500,
+        completion_tokens: 10,
+        prompt_cache_hit_tokens: Some(50),
+        ..ChunkUsage::default()
+    };
+
+    let usage = parse_usage(&raw, &model());
+
+    assert_eq!(usage.cache_read, 50);
+    assert_eq!(usage.input, 450);
+}
+
+#[test]
+fn calculate_cost_applies_the_highest_matching_tier() {
+    let mut tiered = priced_model();
+    tiered.cost.tiers = Some(vec![ModelCostTier {
+        rates: ModelCostRates {
+            input: 6.0,
+            output: 30.0,
+            cache_read: 0.6,
+            cache_write: 7.5,
+        },
+        input_tokens_above: 1_000,
+    }]);
+
+    let mut request_usage = usage();
+    request_usage.input = 2_000;
+    request_usage.output = 100;
+    request_usage.total_tokens = 2_100;
+
+    let cost = calculate_cost(&tiered, &request_usage);
+
+    // 输入 2000 token 超过阈值 1000，整次请求按 6 美元/百万计。
+    assert!((cost.input - 0.012).abs() < 1e-12);
+    assert!((cost.output - 0.003).abs() < 1e-12);
 }

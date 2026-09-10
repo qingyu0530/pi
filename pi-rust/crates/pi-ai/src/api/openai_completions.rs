@@ -7,15 +7,16 @@
 //! C++ 对照：这里的 `Chat*` 结构体相当于只用来序列化的 DTO（数据传输对象），
 //! 字段名必须和线上 JSON 完全一致，否则服务端读不懂。
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::content::{AssistantContent, ToolResultContent, UserContent};
 use crate::context::{Context, Tool};
 use crate::message::{
-    AssistantMessage, ConversationMessage, ToolResultMessage, UserMessage, UserMessageContent,
+    AssistantMessage, ConversationMessage, StopReason, ToolResultMessage, Usage, UsageCost,
+    UserMessage, UserMessageContent,
 };
-use crate::model::Model;
+use crate::model::{Model, calculate_cost};
 
 /// `POST /chat/completions` 的请求体。
 ///
@@ -288,4 +289,206 @@ fn convert_tool(tool: &Tool) -> ChatTool {
             strict: None,
         },
     }
+}
+
+// -----------------------------------------------------------------------------
+// 响应方向：流式 chunk
+// -----------------------------------------------------------------------------
+
+/// 流式返回的单个 chunk，对应 SSE 的一行 `data: {...}`。
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ChatCompletionChunk {
+    /// 本次补全的唯一 id，整个流里所有 chunk 相同。
+    #[serde(default)]
+    pub id: Option<String>,
+    /// 实际服务模型；网关可能路由到与请求不同的模型。
+    #[serde(default)]
+    pub model: Option<String>,
+    /// 候选回复数组，`n = 1` 时只有一个。
+    #[serde(default)]
+    pub choices: Vec<ChunkChoice>,
+    /// token 用量，仅在带 `stream_options.include_usage` 时出现在最后一个 chunk。
+    #[serde(default)]
+    pub usage: Option<ChunkUsage>,
+}
+
+/// 一个候选回复。流式增量都在 `delta` 里。
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ChunkChoice {
+    /// 候选序号（`n > 1` 时区分）。
+    #[serde(default)]
+    pub index: u32,
+    /// 本 chunk 的增量。流结束时可能没有 delta。
+    #[serde(default)]
+    pub delta: Option<ChunkDelta>,
+    /// 结束原因：流中间为 `null`，最后一个 chunk 才有值。
+    #[serde(default)]
+    pub finish_reason: Option<String>,
+    /// 少数厂商把用量放在 choice 里（非标准），做兜底。
+    #[serde(default)]
+    pub usage: Option<ChunkUsage>,
+}
+
+/// 一个 chunk 的增量内容，字段大多是可选的。
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ChunkDelta {
+    /// 角色，通常只在第一个 chunk 出现。
+    #[serde(default)]
+    pub role: Option<String>,
+    /// 正文文本片段，需要累加。
+    #[serde(default)]
+    pub content: Option<String>,
+    /// 推理文本片段（llama.cpp 等）。
+    #[serde(default)]
+    pub reasoning_content: Option<String>,
+    /// 推理文本片段（其它 OpenAI-compatible 端点）。
+    #[serde(default)]
+    pub reasoning: Option<String>,
+    #[serde(default)]
+    pub reasoning_text: Option<String>,
+    /// 工具调用片段，按 `index` 分组累加。
+    #[serde(default)]
+    pub tool_calls: Option<Vec<ChunkToolCall>>,
+}
+
+/// 工具调用片段。第一块带 `id` 和 `function.name`，
+/// 后续块只带 `function.arguments` 字符串片段。
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ChunkToolCall {
+    /// 标识这是第几个工具调用（同一次回复可能调用多个）。
+    #[serde(default)]
+    pub index: u32,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(rename = "type", default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub function: Option<ChunkFunction>,
+}
+
+/// 工具调用的函数名与参数片段。
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ChunkFunction {
+    /// 只在第一块出现。
+    #[serde(default)]
+    pub name: Option<String>,
+    /// 参数 JSON 的字符串片段，需要拼接后再解析。
+    #[serde(default)]
+    pub arguments: Option<String>,
+}
+
+/// 一个 chunk 携带的 token 用量（原始字段）。
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ChunkUsage {
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    #[serde(default)]
+    pub completion_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
+    #[serde(default)]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
+    #[serde(default)]
+    pub completion_tokens_details: Option<CompletionTokensDetails>,
+    /// DeepSeek 系把缓存读放在顶层。
+    #[serde(default)]
+    pub prompt_cache_hit_tokens: Option<u64>,
+    /// Kimi 等把缓存读放在顶层。
+    #[serde(default)]
+    pub cached_tokens: Option<u64>,
+}
+
+/// `prompt_tokens_details` 里的细节。
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct PromptTokensDetails {
+    /// 缓存读（命中）token。
+    #[serde(default)]
+    pub cached_tokens: Option<u64>,
+    /// 缓存写 token（OpenAI 不发，OpenRouter 系会发）。
+    #[serde(default)]
+    pub cache_write_tokens: Option<u64>,
+}
+
+/// `completion_tokens_details` 里的细节。
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct CompletionTokensDetails {
+    /// 其中用于推理的 token。
+    #[serde(default)]
+    pub reasoning_tokens: Option<u64>,
+}
+
+/// 把 OpenAI 的 `finish_reason` 映射成 pi 的 `StopReason`。
+///
+/// 返回第二个值是出错时的错误信息（未知原因或 `content_filter`）。
+#[must_use]
+pub fn map_stop_reason(reason: Option<&str>) -> (StopReason, Option<String>) {
+    match reason {
+        None => (StopReason::Stop, None),
+        Some("stop" | "end") => (StopReason::Stop, None),
+        Some("length") => (StopReason::Length, None),
+        Some("function_call" | "tool_calls") => (StopReason::ToolUse, None),
+        Some("content_filter") => (
+            StopReason::Error,
+            Some("Provider finish_reason: content_filter".to_owned()),
+        ),
+        Some("network_error") => (
+            StopReason::Error,
+            Some("Provider finish_reason: network_error".to_owned()),
+        ),
+        Some(other) => (
+            StopReason::Error,
+            Some(format!("Provider finish_reason: {other}")),
+        ),
+    }
+}
+
+/// 把原始 chunk 用量换算成 pi 的 `Usage`，并按模型价格表算出费用。
+///
+/// 规则（对齐原版）：
+/// - `cache_read`：`prompt_tokens_details.cached_tokens`，否则 `prompt_cache_hit_tokens`，否则 `cached_tokens`。
+/// - `cache_write`：`prompt_tokens_details.cache_write_tokens`。
+/// - `input = prompt_tokens - cache_read - cache_write`（缓存单列，不重复计）。
+/// - `output = completion_tokens`（已包含 reasoning）。
+/// - `total = input + output + cache_read + cache_write`。
+#[must_use]
+pub fn parse_usage(raw: &ChunkUsage, model: &Model) -> Usage {
+    let cache_read = raw
+        .prompt_tokens_details
+        .as_ref()
+        .and_then(|details| details.cached_tokens)
+        .or(raw.prompt_cache_hit_tokens)
+        .or(raw.cached_tokens)
+        .unwrap_or(0);
+    let cache_write = raw
+        .prompt_tokens_details
+        .as_ref()
+        .and_then(|details| details.cache_write_tokens)
+        .unwrap_or(0);
+    let output = raw.completion_tokens;
+    let input = raw
+        .prompt_tokens
+        .saturating_sub(cache_read)
+        .saturating_sub(cache_write);
+    let total_tokens = input + output + cache_read + cache_write;
+    let mut usage = Usage {
+        input,
+        output,
+        cache_read,
+        cache_write,
+        cache_write_1h: None,
+        reasoning: raw
+            .completion_tokens_details
+            .as_ref()
+            .and_then(|details| details.reasoning_tokens),
+        total_tokens,
+        cost: UsageCost {
+            input: 0.0,
+            output: 0.0,
+            cache_read: 0.0,
+            cache_write: 0.0,
+            total: 0.0,
+        },
+    };
+    usage.cost = calculate_cost(model, &usage);
+    usage
 }

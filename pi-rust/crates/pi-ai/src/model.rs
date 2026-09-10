@@ -13,6 +13,7 @@ use crate::compat::{
     AnthropicMessagesCompat, BedrockCompat, OpenAICompletionsCompat, OpenAIResponsesCompat,
 };
 use crate::cost::ModelCost;
+use crate::message::{Usage, UsageCost};
 
 /// 思考级别。
 /// 原版：export type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -137,4 +138,44 @@ pub struct ImagesModel {
     pub headers: Option<HashMap<String, String>>,
     /// 生成的输出类型。
     pub output: Vec<InputType>,
+}
+
+/// 按模型价格表计算一次调用的费用。
+///
+/// 单价都以「每百万 token」计；`tiers` 表示输入超过阈值时整次请求按该档计价，
+/// 取匹配到的最高那一档。1 小时缓存写按输入价 2 倍计（Anthropic 规则）。
+#[must_use]
+pub fn calculate_cost(model: &Model, usage: &Usage) -> UsageCost {
+    let input_tokens = usage.input + usage.cache_read + usage.cache_write; // 都加起来先 决定用哪一档价
+    let mut rates = model.cost.rates;
+    let mut matched_threshold: i64 = -1; // 记录目前匹配到的最高阈值。初始 -1 是一个「比任何合法阈值都小」的哨兵值。
+    for tier in model.cost.tiers.iter().flatten() {
+        // 遍历所有分档
+        if input_tokens > tier.input_tokens_above // 本次输入真的超过这档阈值。
+            && (tier.input_tokens_above as i64) > matched_threshold
+        // 这档阈值比已记录的更高。
+        {
+            rates = tier.rates;
+            matched_threshold = tier.input_tokens_above as i64;
+        }
+    }
+    //  1 小时缓存写的 token 数
+    let long_write = usage.cache_write_1h.unwrap_or(0);
+    // 其余（短时）缓存写
+    // 为什么拆开？ 1 小时缓存写的费用是输入价的 2 倍，而普通缓存写用 cache_write 单价。
+    let short_write = usage.cache_write.saturating_sub(long_write);
+    let input = rates.input / 1_000_000.0 * usage.input as f64;
+    let output = rates.output / 1_000_000.0 * usage.output as f64;
+    let cache_read = rates.cache_read / 1_000_000.0 * usage.cache_read as f64;
+    let cache_write = (rates.cache_write * short_write as f64
+        + rates.input * 2.0 * long_write as f64)
+        / 1_000_000.0;
+
+    UsageCost {
+        input,
+        output,
+        cache_read,
+        cache_write,
+        total: input + output + cache_read + cache_write,
+    }
 }
