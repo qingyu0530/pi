@@ -8,8 +8,12 @@
 //!   Provider     ≈ 抽象基类（接口）
 //!   FauxProvider ≈ 它的一个具体子类
 
-use crate::content::AssistantContent;
-use crate::content::TextContent;
+use std::cell::RefCell;
+use std::collections::VecDeque;
+
+use serde_json::{Map, Value};
+
+use crate::content::{AssistantContent, TextContent, ToolCall};
 use crate::context::Context;
 use crate::event::AssistantMessageEvent;
 use crate::message::{
@@ -51,19 +55,82 @@ pub trait Provider {
     ) -> Box<dyn Iterator<Item = AssistantMessageEvent>>;
 }
 
+/// FauxProvider 脚本里的一段预设回复。
+///
+/// 没有脚本时，FauxProvider 回退为“回显最后一条用户文本”。
+#[derive(Clone, Debug, PartialEq)]
+pub enum FauxResponse {
+    /// 直接回一段文本。
+    Text(String),
+    /// 发起一次工具调用。
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: Map<String, Value>,
+    },
+}
+
+impl FauxResponse {
+    /// 便捷构造一次工具调用。
+    #[must_use]
+    pub fn tool_call(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: Map<String, Value>,
+    ) -> Self {
+        Self::ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments,
+        }
+    }
+}
+
 /// 仅用于测试/学习的 Provider 实现。
 ///
-/// 它不访问网络，保存一份模型清单，并对任何请求返回一段文本回复，
-/// 以 start -> text_start -> text_delta -> text_end -> done 的流式事件输出。
+/// 它不访问网络，保存一份模型清单，并按脚本依次返回回复；
+/// 脚本用完后回退为“回显最后一条用户文本”。
+// 模拟 Provider。
+// 真实 Provider（OpenAI、Anthropic 等）需要：网络、API Key、花钱、结果不确定。
+// 开发和学习时不可能每次都真调。
+// 所以造一个「假」的实现：
+
+// 不联网、不要 Key、不花钱
+// 结果完全可控（脚本化）
+// 它和真实 Provider 实现同一个 Provider trait
+// C++ 对照：Provider 是抽象基类，
+// 真实 Provider 和 FauxProvider 是它的两个子类。
+// 测试时用假的子类替换真的，就是「依赖注入 / 打桩（stub/mock）」。
 #[derive(Clone, Debug, Default)]
 pub struct FauxProvider {
     models: Vec<Model>,
+    /// 待发送的脚本回复。`stream` 只借用 `&self`，
+    /// 但需要推进队列，所以用 `RefCell` 做内部可变性。
+    /// C++ 对照：类似一个 `mutable` 成员。
+    script: RefCell<VecDeque<FauxResponse>>,
 }
 
 impl FauxProvider {
     #[must_use]
     pub fn new(models: Vec<Model>) -> Self {
-        Self { models }
+        Self {
+            models,
+            script: RefCell::new(VecDeque::new()),
+        }
+    }
+
+    /// 用一段脚本创建 Provider，按顺序消费。
+    #[must_use]
+    pub fn with_script(models: Vec<Model>, script: Vec<FauxResponse>) -> Self {
+        Self {
+            models,
+            script: RefCell::new(script.into()),
+        }
+    }
+
+    /// 追加一段脚本回复到队尾。
+    pub fn push_response(&self, response: FauxResponse) {
+        self.script.borrow_mut().push_back(response);
     }
 }
 
@@ -85,38 +152,101 @@ impl Provider for FauxProvider {
         model: &Model,
         context: &Context,
     ) -> Box<dyn Iterator<Item = AssistantMessageEvent>> {
-        // 用最后一条 user 文本来生成回复；没有就回默认文本。
-        let reply = last_user_text(context).unwrap_or_else(|| "Hello from Faux".to_owned());
-        // 中间事件里的 partial 是“还没结束”的助手消息，所以 stop_reason 用 Pending。
-        let partial = text_assistant(model, reply.clone(), StopReason::Pending);
-        let events = vec![
-            AssistantMessageEvent::Start {
-                partial: partial.clone(),
-            },
-            AssistantMessageEvent::TextStart {
-                content_index: 0,
-                partial: partial.clone(),
-            },
-            AssistantMessageEvent::TextDelta {
-                content_index: 0,
-                delta: reply.clone(),
-                partial: partial.clone(),
-            },
-            AssistantMessageEvent::TextEnd {
-                content_index: 0,
-                content: reply.clone(),
-                partial: partial.clone(),
-            },
-            AssistantMessageEvent::Done {
-                reason: StopReason::Stop,
-                message: text_assistant(model, reply, StopReason::Stop),
-            },
-        ];
+        let scripted = self.script.borrow_mut().pop_front();
+        let events = match scripted {
+            Some(FauxResponse::Text(text)) => text_events(model, text),
+            Some(FauxResponse::ToolCall {
+                id,
+                name,
+                arguments,
+            }) => tool_call_events(model, id, name, arguments),
+            // 脚本用完后回退：用最后一条 user 文本来生成回复。
+            None => {
+                let reply = last_user_text(context).unwrap_or_else(|| "Hello from Faux".to_owned());
+                text_events(model, reply)
+            }
+        };
         Box::new(events.into_iter())
     }
 }
 
-/// 取上下文中最后一条用户文本，作为回复来源。
+/// 构造一段文本回复的事件序列：start -> text_start -> text_delta -> text_end -> done。
+fn text_events(model: &Model, reply: String) -> Vec<AssistantMessageEvent> {
+    let content = vec![AssistantContent::Text(TextContent {
+        text: reply.clone(),
+        text_signature: None,
+    })];
+    // 中间事件里的 partial 是“还没结束”的助手消息，所以 stop_reason 用 Pending。
+    let partial = assistant_message(model, content.clone(), StopReason::Pending);
+    vec![
+        AssistantMessageEvent::Start {
+            partial: partial.clone(),
+        },
+        AssistantMessageEvent::TextStart {
+            content_index: 0,
+            partial: partial.clone(),
+        },
+        AssistantMessageEvent::TextDelta {
+            content_index: 0,
+            delta: reply.clone(),
+            partial: partial.clone(),
+        },
+        AssistantMessageEvent::TextEnd {
+            content_index: 0,
+            content: reply,
+            partial: partial.clone(),
+        },
+        AssistantMessageEvent::Done {
+            reason: StopReason::Stop,
+            message: assistant_message(model, content, StopReason::Stop),
+        },
+    ]
+}
+
+/// 构造一段工具调用的事件序列：start -> toolcall_start -> toolcall_delta -> toolcall_end -> done。
+fn tool_call_events(
+    model: &Model,
+    id: String,
+    name: String,
+    arguments: Map<String, Value>,
+) -> Vec<AssistantMessageEvent> {
+    let tool_call = ToolCall {
+        id,
+        name,
+        arguments,
+        thought_signature: None,
+        namespace: None,
+    };
+    let content = vec![AssistantContent::ToolCall(tool_call.clone())];
+    let partial = assistant_message(model, content.clone(), StopReason::Pending);
+    // 工具参数在流式协议里是一段 JSON 文本。
+    let delta = serde_json::to_string(&tool_call.arguments).unwrap_or_default();
+    vec![
+        AssistantMessageEvent::Start {
+            partial: partial.clone(),
+        },
+        AssistantMessageEvent::ToolcallStart {
+            content_index: 0,
+            partial: partial.clone(),
+        },
+        AssistantMessageEvent::ToolcallDelta {
+            content_index: 0,
+            delta,
+            partial: partial.clone(),
+        },
+        AssistantMessageEvent::ToolcallEnd {
+            content_index: 0,
+            tool_call,
+            partial: partial.clone(),
+        },
+        AssistantMessageEvent::Done {
+            reason: StopReason::ToolUse,
+            message: assistant_message(model, content, StopReason::ToolUse),
+        },
+    ]
+}
+
+/// 取上下文中最后一条用户文本，作为回退回复来源。
 fn last_user_text(context: &Context) -> Option<String> {
     for message in context.messages.iter().rev() {
         if let ConversationMessage::User(user) = message {
@@ -128,14 +258,15 @@ fn last_user_text(context: &Context) -> Option<String> {
     None
 }
 
-/// 构造一条只含单个文本块的 AssistantMessage。
-fn text_assistant(model: &Model, text: String, stop_reason: StopReason) -> AssistantMessage {
+/// 构造一条助手消息。
+fn assistant_message(
+    model: &Model,
+    content: Vec<AssistantContent>,
+    stop_reason: StopReason,
+) -> AssistantMessage {
     AssistantMessage {
         role: AssistantRole::Assistant,
-        content: vec![AssistantContent::Text(TextContent {
-            text,
-            text_signature: None,
-        })],
+        content,
         api: model.api.clone(),
         provider: model.provider.clone(),
         model: model.id.clone(),

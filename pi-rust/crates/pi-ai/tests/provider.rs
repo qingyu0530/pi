@@ -1,6 +1,6 @@
 use pi_ai::{
-    AssistantMessageEvent, Context, FauxProvider, InputType, Model, ModelCost, ModelCostRates,
-    Provider, StopReason, UserMessage, UserMessageContent, UserRole,
+    AssistantMessageEvent, Context, FauxProvider, FauxResponse, InputType, Model, ModelCost,
+    ModelCostRates, Provider, StopReason, UserMessage, UserMessageContent, UserRole,
 };
 
 fn faux_model() -> Model {
@@ -67,4 +67,43 @@ fn faux_provider_emits_start_text_and_done() {
         .expect("stream should end with done");
     assert_eq!(done.stop_reason, StopReason::Stop);
     assert!(!done.content.is_empty());
+}
+
+#[test]
+fn faux_provider_emits_scripted_tool_call() {
+    let arguments = serde_json::json!({ "text": "hi" })
+        .as_object()
+        .unwrap()
+        .clone();
+    let provider = FauxProvider::with_script(
+        vec![faux_model()],
+        vec![FauxResponse::tool_call("call_1", "echo", arguments)],
+    );
+    let model = &provider.get_models()[0];
+    let context = Context {
+        system_prompt: None,
+        messages: vec![],
+        tools: None,
+    };
+
+    let events: Vec<AssistantMessageEvent> = provider.stream(model, &context).collect();
+
+    assert!(matches!(events[0], AssistantMessageEvent::Start { .. }));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AssistantMessageEvent::ToolcallEnd { .. }))
+    );
+    let done = events
+        .iter()
+        .find_map(|event| match event {
+            AssistantMessageEvent::Done { reason, message } => Some((reason, message)),
+            _ => None,
+        })
+        .expect("stream should end with done");
+    assert_eq!(*done.0, StopReason::ToolUse);
+    assert!(matches!(
+        done.1.content[0],
+        pi_ai::AssistantContent::ToolCall(_)
+    ));
 }

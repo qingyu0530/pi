@@ -44,4 +44,4 @@ pub use message::{
 pub use model::{
     ImagesModel, InputType, Model, ModelCompat, ModelThinkingLevel, ThinkingLevel, ThinkingLevelMap,
 };
-pub use provider::{FauxProvider, Provider};
+pub use provider::{FauxProvider, FauxResponse, Provider};
