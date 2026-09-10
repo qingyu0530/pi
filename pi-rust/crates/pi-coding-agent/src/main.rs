@@ -1,6 +1,6 @@
 use std::io;
 
-use pi_agent_core::{Agent, AgentEvent, EchoTool};
+use pi_agent_core::{Agent, AgentEvent, EchoTool, ReadTool, RealEnvironment, WriteTool};
 use pi_ai::{
     FauxProvider, FauxResponse, InputType, Model, ModelCost, ModelCostRates, UserMessage,
     UserMessageContent, UserRole,
@@ -36,24 +36,26 @@ fn faux_model() -> Model {
 
 fn main() -> io::Result<()> {
     let model = faux_model();
-    // 脚本：先发起一次 echo 工具调用，再回一段最终文本。
-    let arguments = serde_json::json!({ "text": "Hello from echo tool" })
+    // 脚本：先调用 read 工具读取 Cargo.toml，再回一段最终文本。
+    let arguments = serde_json::json!({ "path": "Cargo.toml" })
         .as_object()
         .unwrap()
         .clone();
     let provider = FauxProvider::with_script(
         vec![model.clone()],
         vec![
-            FauxResponse::tool_call("call_1", "echo", arguments),
+            FauxResponse::tool_call("call_1", "read", arguments),
             FauxResponse::Text("完成".to_owned()),
         ],
     );
 
     let mut agent = Agent::new(Box::new(provider), model);
     agent.add_tool(Box::new(EchoTool));
+    agent.add_tool(Box::new(ReadTool::new(Box::new(RealEnvironment))));
+    agent.add_tool(Box::new(WriteTool::new(Box::new(RealEnvironment))));
     agent.add_message(UserMessage {
         role: UserRole::User,
-        content: UserMessageContent::Text("请调用 echo 工具".to_owned()),
+        content: UserMessageContent::Text("请读取 Cargo.toml".to_owned()),
         timestamp: 0,
     });
 

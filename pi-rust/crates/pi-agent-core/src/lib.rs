@@ -8,11 +8,16 @@
 //!   Agent 持有 Box<dyn Provider> ≈ 持有一个抽象基类指针，
 //!   运行时才决定具体用哪个子类（FauxProvider 或真实 Provider）。
 
+mod environment;
 mod event;
 mod tool;
+mod tools;
+mod truncate;
 
+pub use environment::{EnvError, Environment, RealEnvironment};
 pub use event::AgentEvent;
 pub use tool::{AgentTool, EchoTool, ToolError, ToolResult};
+pub use tools::{ReadTool, WriteTool};
 
 use pi_ai::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, Context, ConversationMessage, Model,
@@ -93,7 +98,7 @@ impl Agent {
     /// - `Start` -> `MessageStart`   助手消息开始（收到 Start 时）
     /// - 各种 start/delta/end -> `MessageUpdate`  流式中间更新（text/thinking/toolcall 的 start/delta/end）
     /// - `Done`/`Error` -> `MessageEnd`  消息结束（拿到最终 Done/Error 后）
-    /// 
+    ///
     /// C++ 对照：`sink` 是一个回调函数对象（`std::function<void(AgentEvent)>`）。
     pub fn run_once(
         &mut self,
