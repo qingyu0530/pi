@@ -1,10 +1,11 @@
 use pi_agent_core::{
-    CompactionSettings, build_summary_prompt, compact, estimate_context_tokens, estimate_tokens,
-    plan_compaction, should_compact,
+    Agent, CompactionSettings, build_summary_prompt, compact, estimate_context_tokens,
+    estimate_tokens, plan_compaction, should_compact,
 };
 use pi_ai::{
-    AssistantContent, AssistantMessage, AssistantRole, ConversationMessage, StopReason,
-    TextContent, Usage, UsageCost, UserMessage, UserMessageContent, UserRole,
+    AssistantContent, AssistantMessage, AssistantRole, ConversationMessage, FauxProvider,
+    InputType, Model, ModelCost, ModelCostRates, StopReason, TextContent, Usage, UsageCost,
+    UserMessage, UserMessageContent, UserRole,
 };
 
 fn user(text: &str) -> ConversationMessage {
@@ -149,4 +150,76 @@ fn summary_prompt_contains_rendered_messages_and_instructions() {
     assert!(prompt.contains("user: 帮我重构"));
     assert!(prompt.contains("assistant: 好的"));
     assert!(prompt.contains("## Goal"));
+}
+
+fn faux_model(context_window: u64) -> Model {
+    Model {
+        id: "faux-1".to_owned(),
+        name: "Faux".to_owned(),
+        api: "faux".to_owned(),
+        provider: "faux".to_owned(),
+        base_url: "http://localhost".to_owned(),
+        reasoning: false,
+        thinking_level_map: None,
+        input: vec![InputType::Text],
+        cost: ModelCost {
+            rates: ModelCostRates {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            tiers: None,
+        },
+        context_window,
+        max_tokens: 1_024,
+        sampling_params: None,
+        headers: None,
+        compat: None,
+    }
+}
+
+#[test]
+fn agent_compacts_context_when_over_threshold() {
+    // 很小的上下文窗口，保证触发压缩。
+    let model = faux_model(50);
+    let provider = FauxProvider::new(vec![model.clone()]);
+    let mut agent = Agent::new(Box::new(provider), model);
+
+    for index in 0..20 {
+        agent.add_message(user(&format!("message {index} {}", "x".repeat(50))));
+    }
+
+    let settings = CompactionSettings {
+        enabled: true,
+        reserve_tokens: 10,
+        keep_recent_tokens: 5,
+    };
+    let result = agent.maybe_compact(settings).unwrap();
+
+    assert!(result.is_some(), "should have compacted");
+    // 压缩后消息数应远少于 20。
+    assert!(agent.messages().len() < 20);
+    // 第一条应是摘要消息（user 角色）。
+    assert!(matches!(
+        agent.messages().first(),
+        Some(ConversationMessage::User(_))
+    ));
+}
+
+#[test]
+fn agent_skips_compaction_under_threshold() {
+    let model = faux_model(1_000_000);
+    let provider = FauxProvider::new(vec![model.clone()]);
+    let mut agent = Agent::new(Box::new(provider), model);
+    agent.add_message(user("hello"));
+
+    let result = agent.maybe_compact(CompactionSettings {
+        enabled: true,
+        reserve_tokens: 10,
+        keep_recent_tokens: 5,
+    });
+
+    assert!(result.unwrap().is_none());
+    assert_eq!(agent.messages().len(), 1);
 }

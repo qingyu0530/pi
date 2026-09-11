@@ -29,7 +29,8 @@ pub use tools::{EditTool, ReadTool, WriteTool};
 
 use pi_ai::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, Context, ConversationMessage, Model,
-    Provider, StopReason, ToolCall, ToolResultMessage, ToolResultRole,
+    Provider, StopReason, ToolCall, ToolResultMessage, ToolResultRole, UserMessage,
+    UserMessageContent, UserRole,
 };
 use serde_json::Value;
 
@@ -43,6 +44,8 @@ pub enum AgentError {
     IncompleteStream,
     /// 对话轮数超过上限，可能是模型一直发起工具调用。
     MaxTurnsExceeded { limit: usize },
+    /// 上下文压缩失败。
+    Compaction(String),
 }
 
 /// 一次 Agent 会话的状态与行为。
@@ -296,6 +299,104 @@ impl Agent {
                 .collect(),
         )
     }
+
+    /// 若上下文超过阈值，把旧消息摘要成一段总结并替换，返回压缩结果。
+    ///
+    /// 摘要由本 Agent 的 Provider 生成（用系统提示 + 要摘要的旧消息）。
+    /// 压缩后消息列表变成「一条摘要消息 + 保留的近期消息」。
+    pub fn maybe_compact(
+        &mut self,
+        settings: CompactionSettings, // 压缩设置（阈值、保留量）
+    ) -> Result<Option<CompactionResult>, AgentError> {
+        // 把当前所有消息折成 token 估算值。
+        let context_tokens = estimate_context_tokens(&self.messages);
+        // self.model.context_window：该模型的上下文窗口大小。
+        // 没到阈值 → 直接返回 Ok(None)（不压缩）。提前退出。
+
+        if !should_compact(context_tokens, self.model.context_window, settings) {
+            return Ok(None);
+        }
+
+        // 先克隆，避免闭包借用 self 时与外面的可变借用冲突。
+        let model = self.model.clone();
+        let messages = self.messages.clone();
+        let provider = self.provider.as_ref();
+        // 执行压缩 消息、设置、一个闭包作为摘要器
+        let result = compact(&messages, settings, |system, prompt| {
+            summarize_with_provider(provider, &model, system, prompt)
+        }) // ?：失败就提前返回错误
+        .map_err(|error| AgentError::Compaction(error.message))?;
+
+        // 用「摘要 + 保留的近期消息」替换原来的全部消息。
+        let mut new_messages = Vec::with_capacity(result.retained_tail.len() + 1);// 预分配容量，减少扩容
+        new_messages.push(summary_message(&result.summary)); // 第一条放摘要
+        new_messages.extend(result.retained_tail.iter().cloned()); // 把保留的近期消息接上去
+        self.messages = new_messages; // 整体替换（这就是「替代」）。
+        // 返回压缩结果（Some 表示确实压缩了）
+        Ok(Some(result))
+    }
+}
+
+/// 把摘要包成一条用户消息，作为压缩后的上下文。
+fn summary_message(summary: &str) -> ConversationMessage {
+    UserMessage {
+        role: UserRole::User,
+        content: UserMessageContent::Text(format!(
+            "[Earlier conversation summarized to save context]\n\n{summary}"
+        )),
+        timestamp: 0,
+    }
+    .into()
+}
+
+/// 用给定 Provider 生成摘要文本。
+fn summarize_with_provider(
+    provider: &dyn Provider,
+    model: &Model,
+    system: &str,
+    prompt: &str,
+) -> Result<String, CompactionError> {
+    // 构造请求上下文
+    // 把「请你总结这段对话」组织成一次普通模型请求
+    let context = Context {
+        system_prompt: Some(system.to_owned()),
+        messages: vec![
+            UserMessage {
+                role: UserRole::User,
+                content: UserMessageContent::Text(prompt.to_owned()),
+                timestamp: 0,
+            }
+            .into(),
+        ],
+        tools: None,
+    };
+
+    let mut summary = String::new();
+    let mut done = false;
+    for event in provider.stream(model, &context) {
+        match event {
+            AssistantMessageEvent::Done { message, .. } => {
+                for block in message.content {
+                    if let AssistantContent::Text(text) = block {
+                        summary.push_str(&text.text);
+                    }
+                }
+                done = true;
+            }
+            AssistantMessageEvent::Error { error, .. } => {
+                return Err(CompactionError::new(
+                    error
+                        .error_message
+                        .unwrap_or_else(|| "摘要生成失败".to_owned()),
+                ));
+            }
+            _ => {}
+        }
+    }
+    if !done {
+        return Err(CompactionError::new("摘要流未正常结束"));
+    }
+    Ok(summary)
 }
 
 /// 把一次工具执行的结果组装成工具结果消息。

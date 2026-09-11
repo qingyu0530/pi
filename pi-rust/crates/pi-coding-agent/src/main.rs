@@ -1,6 +1,9 @@
 use std::io::{self, Write};
 
-use pi_agent_core::{Agent, AgentEvent, EditTool, ReadTool, RealEnvironment, Session, WriteTool};
+use pi_agent_core::{
+    Agent, AgentEvent, DEFAULT_COMPACTION_SETTINGS, EditTool, ReadTool, RealEnvironment, Session,
+    WriteTool,
+};
 use pi_ai::{
     AssistantMessageEvent, FauxProvider, FauxResponse, InputType, Model, ModelCost, ModelCostRates,
     OpenAiCompletionsProvider, StopReason, UreqTransport, UserMessage, UserMessageContent,
@@ -117,6 +120,9 @@ impl Cli {
 
     /// 执行一轮对话并持久化。
     fn run_turn(&mut self, prompt: String) -> io::Result<()> {
+        // 先检查上下文是否过长；需要时压缩后再开始本轮。
+        self.compact_if_needed()?;
+        // 之后才把用户消息加进去
         self.agent.add_message(UserMessage {
             role: UserRole::User,
             content: UserMessageContent::Text(prompt),
@@ -152,6 +158,34 @@ impl Cli {
         }
 
         self.persist()
+    }
+
+    /// 若上下文超过阈值，用当前 Provider 生成摘要并替换旧消息；随后重建会话文件。
+    fn compact_if_needed(&mut self) -> io::Result<()> {
+        let result = self
+            .agent
+            .maybe_compact(DEFAULT_COMPACTION_SETTINGS)
+            .map_err(|error| io::Error::other(format!("压缩失败: {error:?}")))?;
+
+        let Some(result) = result else {
+            return Ok(());
+        };
+
+        eprintln!(
+            "\n[已压缩上下文：现有 {} 条消息，压缩前约 {} token]",
+            self.agent.messages().len(),
+            result.tokens_before
+        );
+        // 重建会话
+        // 压缩改变了消息列表，用当前消息重建会话（丢弃被摘要掉的旧记录）。
+        self.session = Session::new();
+        for message in self.agent.messages() {
+            self.session.push_message(message.clone());
+        }
+        self.persisted_messages = self.agent.messages().len();
+        self.session // 保存
+            .save(&self.env, &self.session_path)
+            .map_err(|error| io::Error::other(format!("保存会话失败: {}", error.message)))
     }
 
     /// 把尚未保存的新消息追加进会话并写盘。

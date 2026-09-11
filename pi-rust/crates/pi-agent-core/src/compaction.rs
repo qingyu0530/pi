@@ -5,8 +5,13 @@
 //! 估算 token → 判断是否该压缩 → 切分「要摘要的旧消息」和「保留的近期消息」
 //! → 调摘要器 → 返回结果。摘要器由调用方提供，便于测试（也便于接真实模型）。
 
-use pi_ai::{ // 需要遍历各种消息的内容来估算 token。
-    AssistantContent, ConversationMessage, StopReason, ToolResultContent, UserContent,
+use pi_ai::{
+    // 需要遍历各种消息的内容来估算 token。
+    AssistantContent,
+    ConversationMessage,
+    StopReason,
+    ToolResultContent,
+    UserContent,
     UserMessageContent,
 };
 
@@ -57,7 +62,8 @@ const ESTIMATED_IMAGE_CHARS: usize = 4_800;
 /// 估算一条消息的字符数。   实际含义：把一条消息的所有文本折算成「字符数」。
 fn message_chars(message: &ConversationMessage) -> usize {
     match message {
-        ConversationMessage::User(user) => match &user.content { // 用户消息：纯文本或内容块（图片按固定字符数折算）。
+        ConversationMessage::User(user) => match &user.content {
+            // 用户消息：纯文本或内容块（图片按固定字符数折算）。
             UserMessageContent::Text(text) => text.chars().count(),
             UserMessageContent::Blocks(blocks) => blocks
                 .iter()
@@ -67,20 +73,22 @@ fn message_chars(message: &ConversationMessage) -> usize {
                 })
                 .sum(),
         },
-        ConversationMessage::Assistant(assistant) => assistant // 助手消息：文本 + 思考 + 工具调用（工具名 + 参数 JSON）。
-            .content
-            .iter()
-            .map(|block| match block {
-                AssistantContent::Text(text) => text.text.chars().count(),
-                AssistantContent::Thinking(thinking) => thinking.thinking.chars().count(),
-                AssistantContent::ToolCall(call) => {
-                    call.name.chars().count()
-                        + serde_json::to_string(&call.arguments)
-                            .map(|json| json.chars().count())
-                            .unwrap_or(0)
-                }
-            })
-            .sum(),
+        ConversationMessage::Assistant(assistant) => {
+            assistant // 助手消息：文本 + 思考 + 工具调用（工具名 + 参数 JSON）。
+                .content
+                .iter()
+                .map(|block| match block {
+                    AssistantContent::Text(text) => text.text.chars().count(),
+                    AssistantContent::Thinking(thinking) => thinking.thinking.chars().count(),
+                    AssistantContent::ToolCall(call) => {
+                        call.name.chars().count()
+                            + serde_json::to_string(&call.arguments)
+                                .map(|json| json.chars().count())
+                                .unwrap_or(0)
+                    }
+                })
+                .sum()
+        }
         ConversationMessage::ToolResult(result) => result // 工具结果：文本 + 图片。
             .content
             .iter()
@@ -100,7 +108,8 @@ pub fn estimate_tokens(message: &ConversationMessage) -> usize {
 
 /// 把用量换算成「上下文 token 总数」。
 fn usage_context_tokens(usage: &pi_ai::Usage) -> usize {
-    if usage.total_tokens > 0 { // 优先用服务端给的 total_tokens；没有就各项相加。
+    if usage.total_tokens > 0 {
+        // 优先用服务端给的 total_tokens；没有就各项相加。
         usage.total_tokens as usize
     } else {
         (usage.input + usage.output + usage.cache_read + usage.cache_write) as usize
@@ -116,7 +125,8 @@ pub fn estimate_context_tokens(messages: &[ConversationMessage]) -> usize {
     // 从后往前找最近一条有效的 assistant 消息，它的 usage 是服务端实测的上下文大小。
     for (index, message) in messages.iter().enumerate().rev() {
         if let ConversationMessage::Assistant(assistant) = message {
-            let valid = !matches!( // 排除出错/中止的消息（它们的 usage 不可信）。
+            let valid = !matches!(
+                // 排除出错/中止的消息（它们的 usage 不可信）。
                 assistant.stop_reason,
                 StopReason::Error | StopReason::Aborted
             );
@@ -296,7 +306,7 @@ pub fn compact(
     })
 }
 /*
-超过阈值 → 从最新往前数出「保留的近期消息」和「要摘要的旧消息」→ 只把旧消息发给模型 → 
+超过阈值 → 从最新往前数出「保留的近期消息」和「要摘要的旧消息」→ 只把旧消息发给模型 →
 模型返回一段摘要文本 → 用「摘要 + 近期消息」替换掉原来的全部消息。
 
 
