@@ -5,4 +5,5 @@
 //! 目前只有 OpenAI-compatible 的 Chat Completions。
 
 pub mod http;
+pub mod http_ureq;
 pub mod openai_completions;

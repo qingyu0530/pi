@@ -17,6 +17,7 @@ repository = "https://github.com/earendil-works/pi-mono"
 [workspace.dependencies]
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
+ureq = { version = "=3.4.1", default-features = false, features = ["rustls", "gzip"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

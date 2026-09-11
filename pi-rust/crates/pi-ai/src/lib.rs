@@ -48,3 +48,8 @@ pub use model::{
     ThinkingLevelMap, calculate_cost,
 };
 pub use provider::{FauxProvider, FauxResponse, Provider};
+
+// API 协议层与真实传输
+pub use api::http::{HttpError, HttpRequest, HttpTransport};
+pub use api::http_ureq::UreqTransport;
+pub use api::openai_completions::{OpenAiCompletionsProvider, aggregate_sse};
