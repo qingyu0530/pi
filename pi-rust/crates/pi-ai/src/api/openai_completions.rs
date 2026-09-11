@@ -7,14 +7,19 @@
 //! C++ 对照：这里的 `Chat*` 结构体相当于只用来序列化的 DTO（数据传输对象），
 //! 字段名必须和线上 JSON 完全一致，否则服务端读不懂。
 
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use std::collections::HashMap;
 
-use crate::content::{AssistantContent, ToolResultContent, UserContent};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+use crate::content::{
+    AssistantContent, TextContent, ThinkingContent, ToolCall, ToolResultContent, UserContent,
+};
 use crate::context::{Context, Tool};
+use crate::event::AssistantMessageEvent;
 use crate::message::{
-    AssistantMessage, ConversationMessage, StopReason, ToolResultMessage, Usage, UsageCost,
-    UserMessage, UserMessageContent,
+    AssistantMessage, AssistantRole, ConversationMessage, StopReason, ToolResultMessage, Usage,
+    UsageCost, UserMessage, UserMessageContent,
 };
 use crate::model::{Model, calculate_cost};
 
@@ -491,4 +496,447 @@ pub fn parse_usage(raw: &ChunkUsage, model: &Model) -> Usage {
     };
     usage.cost = calculate_cost(model, &usage);
     usage
+}
+
+// -----------------------------------------------------------------------------
+// 流式聚合：把一串 chunk 拼装成完整的 AssistantMessage
+// -----------------------------------------------------------------------------
+
+/// 累积中的一个内容块。
+///
+/// 流式响应里，文本/思考/工具调用都是一小片一小片到达的；
+/// 这里先把它们按顺序攒起来，等流结束时再拼成最终的 `AssistantContent`。
+#[derive(Clone, Debug)]
+enum Block {
+    /// 文本块，`text` 是所有文本片段的累加。
+    Text(String),
+    /// 思考块，`signature` 记录推理字段名。
+    Thinking { text: String, signature: String },
+    /// 工具调用块，参数先按原始 JSON 字符串累加，结束时再解析。
+    ToolCall {
+        id: String,
+        name: String,
+        arguments_json: String,
+    },
+}
+
+/// 把一个 SSE chunk 序列聚合成完整助手消息与流式事件。
+// SSE = Server-Sent Events（服务器推送事件），是一种基于 HTTP 的流式传输协议：客户端发一个请求后，
+// 服务器不一次性返回，而是保持连接，像「挤牙膏」一样一行行把文本吐回来。
+pub struct ChatCompletionStream {
+    model: Model,
+    response_id: Option<String>, // 服务端返回的本次补全 id（第一个 chunk 里取）
+    response_model: Option<String>, // 实际服务的模型名（网关可能路由到不同模型）。
+    usage: Usage, // token 用量 + 费用，拿到最后一个 chunk 的 usage 后填
+    stop_reason: StopReason,
+    raw_stop_reason: Option<String>,
+    error_message: Option<String>,
+    has_finish_reason: bool, // 是否收到过 finish_reason
+    blocks: Vec<Block>, // 累积的内容块列表，顺序即最终顺序
+    text_block: Option<usize>,
+    thinking_block: Option<usize>,
+    tool_blocks: HashMap<u32, usize>,
+    timestamp: u64,
+}
+
+impl ChatCompletionStream {
+    /// 为指定模型创建一个聚合器。
+    /// 聚合器不是把 chunk 存成一堆，而是边收边合并，把一个有状态的过程做出来
+    #[must_use]
+    pub fn new(model: Model) -> Self {
+        Self {
+            model,
+            response_id: None,
+            response_model: None,
+            usage: zero_usage(),
+            stop_reason: StopReason::Pending,
+            raw_stop_reason: None,
+            error_message: None,
+            has_finish_reason: false,
+            blocks: Vec::new(),
+            text_block: None,
+            thinking_block: None,
+            tool_blocks: HashMap::new(),
+            timestamp: now_millis(),
+        }
+    }
+
+    /// 流开始时发出的 `start` 事件。
+    #[must_use]
+    pub fn start_event(&self) -> AssistantMessageEvent {
+        AssistantMessageEvent::Start {
+            partial: self.snapshot(),
+        }
+    }
+
+    /// 处理一个 chunk，返回它产生的中间事件（text/thinking/toolcall 的 start/delta）。
+    pub fn handle_chunk(&mut self, chunk: &ChatCompletionChunk) -> Vec<AssistantMessageEvent> {
+        let mut events = Vec::new();
+        // 记录 response id
+        // 服务端给这次补全一个唯一 id（如 "cmpl_1"），每个 chunk 都带同一个。
+        // 我们只取第一次遇到的（所以先判断 is_none()）。
+        if self.response_id.is_none() {
+            self.response_id.clone_from(&chunk.id);
+        }
+        // 记录实际模型名
+        // 你请求的是 "auto"，网关可能实际路由到 "anthropic/claude-3"；
+        // 或者请求名和返回名不同。我们记录服务端实际用的模型。
+        if let Some(chunk_model) = &chunk.model {
+            if !chunk_model.is_empty()
+                && chunk_model != &self.model.id
+                && self.response_model.is_none()
+            {
+                self.response_model = Some(chunk_model.clone());
+            }
+        }
+        // 记录 token 用量
+        if let Some(usage) = &chunk.usage {
+            self.usage = parse_usage(usage, &self.model);
+        }
+        // 取第一个候选回复
+        let Some(choice) = chunk.choices.first() else {
+            return events;
+        };
+
+        // 少数厂商把用量放在 choice 里，做兜底。
+        if chunk.usage.is_none() {
+            if let Some(usage) = &choice.usage {
+                self.usage = parse_usage(usage, &self.model);
+            }
+        }
+        // 处理结束原因
+        if let Some(reason) = &choice.finish_reason {
+            self.raw_stop_reason = Some(reason.clone());
+            let (stop_reason, error_message) = map_stop_reason(Some(reason));
+            self.stop_reason = stop_reason;
+            if let Some(message) = error_message {
+                self.error_message = Some(message);
+            }
+            self.has_finish_reason = true;
+        }
+        // delta 是这一 chunk 的增量内容，结束 chunk 可能没有 delta 
+        let Some(delta) = &choice.delta else {
+            return events;
+        };
+        // 一个 delta 里可能同时有文本、推理、工具调用片段，所以三者都要处理。
+        self.handle_text(delta, &mut events);
+        self.handle_thinking(delta, &mut events);
+        self.handle_tool_calls(delta, &mut events);
+
+        events
+    }
+    /*
+    handle_chunk 做四件事——
+
+    1.记录元信息（response id / 实际模型 / 用量）；
+    2.处理结束原因（finish_reason → stop_reason）；
+    3.把 delta 分派给文本/推理/工具三个处理器；
+    4.返回本次产生的事件。
+    
+    它自己不直接改内容，内容修改都在 handle_text/handle_thinking/handle_tool_calls 里。
+    
+    */
+
+    /// 处理文本增量。
+    fn handle_text(&mut self, delta: &ChunkDelta, events: &mut Vec<AssistantMessageEvent>) {
+        let Some(content) = &delta.content else {
+            return; // 没有文本就退出
+        };
+        if content.is_empty() {
+            return; // 空串也退出
+        }
+        // 些 chunk 的 content 是 ""（空串），没有实际内容。
+        // 空串也算「没有」，直接跳过，避免产生无意义的事件。
+
+        let index = match self.text_block {
+            Some(index) => index, // 已经有文本块了，直接用它
+            None => { // 还没有，说明这是第一片文本，要新建
+                self.blocks.push(Block::Text(String::new()));
+                let index = self.blocks.len() - 1;
+                self.text_block = Some(index);
+                events.push(AssistantMessageEvent::TextStart {
+                    content_index: index as u32,
+                    partial: self.snapshot(),
+                });
+                index
+            }
+        };
+        // 把文本片追加进去
+        if let Block::Text(text) = &mut self.blocks[index] {
+            text.push_str(content);
+        }
+        // 发 增量事件
+        events.push(AssistantMessageEvent::TextDelta {
+            content_index: index as u32,
+            delta: content.clone(),
+            partial: self.snapshot(),
+        });
+    }
+
+    /// 处理推理增量（reasoning_content / reasoning / reasoning_text）。
+    fn handle_thinking(&mut self, delta: &ChunkDelta, events: &mut Vec<AssistantMessageEvent>) {
+        let Some((signature, text)) = first_reasoning(delta) else {
+            return;
+        };
+        let index = match self.thinking_block {
+            Some(index) => index,
+            None => {
+                self.blocks.push(Block::Thinking {
+                    text: String::new(),
+                    signature,
+                });
+                let index = self.blocks.len() - 1;
+                self.thinking_block = Some(index);
+                events.push(AssistantMessageEvent::ThinkingStart {
+                    content_index: index as u32,
+                    partial: self.snapshot(),
+                });
+                index
+            }
+        };
+        if let Block::Thinking { text: thinking, .. } = &mut self.blocks[index] {
+            thinking.push_str(&text);
+        }
+        events.push(AssistantMessageEvent::ThinkingDelta {
+            content_index: index as u32,
+            delta: text,
+            partial: self.snapshot(),
+        });
+    }
+
+    /// 处理工具调用增量（按 chunk 的 index 分组累加）。
+    fn handle_tool_calls(&mut self, delta: &ChunkDelta, events: &mut Vec<AssistantMessageEvent>) {
+        let Some(tool_calls) = &delta.tool_calls else {
+            return;
+        };
+        for tool_call in tool_calls {
+            let index = if let Some(&index) = self.tool_blocks.get(&tool_call.index) {
+                index
+            } else {
+                let id = tool_call.id.clone().unwrap_or_default();
+                let name = tool_call
+                    .function
+                    .as_ref()
+                    .and_then(|function| function.name.clone())
+                    .unwrap_or_default();
+                self.blocks.push(Block::ToolCall {
+                    id,
+                    name,
+                    arguments_json: String::new(),
+                });
+                let index = self.blocks.len() - 1;
+                self.tool_blocks.insert(tool_call.index, index);
+                events.push(AssistantMessageEvent::ToolcallStart {
+                    content_index: index as u32,
+                    partial: self.snapshot(),
+                });
+                index
+            };
+
+            // 第一块可能只带 id/name，后续补齐。
+            if let Block::ToolCall { id, name, .. } = &mut self.blocks[index] {
+                if id.is_empty() {
+                    if let Some(new_id) = &tool_call.id {
+                        id.clone_from(new_id);
+                    }
+                }
+                if name.is_empty() {
+                    if let Some(function) = &tool_call.function {
+                        if let Some(new_name) = &function.name {
+                            name.clone_from(new_name);
+                        }
+                    }
+                }
+            }
+
+            if let Some(arguments) = tool_call
+                .function
+                .as_ref()
+                .and_then(|function| function.arguments.as_ref())
+            {
+                if !arguments.is_empty() {
+                    if let Block::ToolCall { arguments_json, .. } = &mut self.blocks[index] {
+                        arguments_json.push_str(arguments);
+                    }
+                    events.push(AssistantMessageEvent::ToolcallDelta {
+                        content_index: index as u32,
+                        delta: arguments.clone(),
+                        partial: self.snapshot(),
+                    });
+                }
+            }
+        }
+    }
+
+    /// 收尾：为每个内容块发 end 事件，最后发 `done` 或 `error`。
+    pub fn finish(&mut self) -> Vec<AssistantMessageEvent> {
+        let mut events = Vec::new();
+        for (index, block) in self.blocks.iter().enumerate() {
+            match block { // 按块类型发 end
+                // 文本/思考：content 是累积后的完整文本（不是片段
+                Block::Text(text) => events.push(AssistantMessageEvent::TextEnd {
+                    content_index: index as u32,
+                    content: text.clone(),
+                    partial: self.snapshot(),
+                }),
+                Block::Thinking { text, .. } => events.push(AssistantMessageEvent::ThinkingEnd {
+                    content_index: index as u32,
+                    content: text.clone(),
+                    partial: self.snapshot(),
+                }),
+                // 工具调用：把累积的 arguments_json 字符串解析成对象，组装成完整 ToolCall。
+                // parse_arguments(arguments_json)：这是唯一把工具参数变成对象的地方（流中一直存字符串）。
+                Block::ToolCall {
+                    id,
+                    name,
+                    arguments_json,
+                } => events.push(AssistantMessageEvent::ToolcallEnd {
+                    content_index: index as u32,
+                    tool_call: ToolCall {
+                        id: id.clone(),
+                        name: name.clone(),
+                        arguments: parse_arguments(arguments_json),
+                        thought_signature: None,
+                        namespace: None,
+                    },
+                    partial: self.snapshot(),
+                }),
+            }
+        }
+        // 推断结束原因
+        // 没收到 finish_reason 时，按是否有工具调用推断结束原因。
+        if !self.has_finish_reason && self.stop_reason == StopReason::Pending {
+            self.stop_reason = if self
+                .blocks
+                .iter()
+                .any(|block| matches!(block, Block::ToolCall { .. }))
+            {
+                StopReason::ToolUse
+            } else {
+                StopReason::Stop
+            };
+        }
+        // 发最终事件
+        if self.stop_reason == StopReason::Error {
+            events.push(AssistantMessageEvent::Error {
+                reason: StopReason::Error,
+                error: self.snapshot(),
+            });
+        } else {
+            events.push(AssistantMessageEvent::Done {
+                reason: self.stop_reason,
+                message: self.snapshot(),
+            });
+        }
+        events
+    }
+
+    /// 当前累积状态快照（克隆成一条完整助手消息）。
+    // 把当前所有累积状态克隆成一条完整助手消息，供事件携带。
+    #[must_use]
+    pub fn snapshot(&self) -> AssistantMessage {
+        AssistantMessage {
+            role: AssistantRole::Assistant,
+            content: self.blocks.iter().map(block_to_content).collect(),
+            api: self.model.api.clone(),
+            provider: self.model.provider.clone(),
+            model: self.model.id.clone(),
+            response_model: self.response_model.clone(),
+            response_id: self.response_id.clone(),
+            diagnostics: None,
+            usage: self.usage.clone(),
+            stop_reason: self.stop_reason,
+            deferred: None,
+            error_message: self.error_message.clone(),
+            raw_stop_reason: self.raw_stop_reason.clone(),
+            end_turn: None,
+            timestamp: self.timestamp,
+        }
+    }
+}
+
+/// 把内部块转成最终内容。
+fn block_to_content(block: &Block) -> AssistantContent {
+    match block {
+        Block::Text(text) => AssistantContent::Text(TextContent {
+            text: text.clone(),
+            text_signature: None,
+        }),
+        Block::Thinking { text, signature } => AssistantContent::Thinking(ThinkingContent {
+            thinking: text.clone(),
+            thinking_signature: if signature.is_empty() {
+                None
+            } else {
+                Some(signature.clone())
+            },
+            redacted: None,
+        }),
+        Block::ToolCall {
+            id,
+            name,
+            arguments_json,
+        } => AssistantContent::ToolCall(ToolCall {
+            id: id.clone(),
+            name: name.clone(),
+            arguments: parse_arguments(arguments_json),
+            thought_signature: None,
+            namespace: None,
+        }),
+    }
+}
+
+/// 解析流式累积的工具参数 JSON；解析失败时按空对象处理。
+fn parse_arguments(arguments_json: &str) -> Map<String, Value> {
+    if arguments_json.is_empty() {
+        return Map::new();
+    }
+    match serde_json::from_str::<Value>(arguments_json) {
+        Ok(Value::Object(map)) => map,
+        _ => Map::new(),
+    }
+}
+
+/// 取第一个非空的推理字段，返回（字段名，文本）。
+/// 不同 Provider 用不同字段名放推理文本。
+/// 为了避免同一内容被重复处理（有的同时返回两个相同字段），只取第一个非空的。
+fn first_reasoning(delta: &ChunkDelta) -> Option<(String, String)> {
+    let candidates = [
+        ("reasoning_content", &delta.reasoning_content),
+        ("reasoning", &delta.reasoning),
+        ("reasoning_text", &delta.reasoning_text),
+    ];
+    for (name, value) in candidates {
+        if let Some(text) = value {
+            if !text.is_empty() {
+                return Some((name.to_owned(), text.clone()));
+            }
+        }
+    }
+    None
+}
+/// 返回一个全 0 的用量，作为流开始时的初始值
+fn zero_usage() -> Usage {
+    Usage {
+        input: 0,
+        output: 0,
+        cache_read: 0,
+        cache_write: 0,
+        cache_write_1h: None,
+        reasoning: None,
+        total_tokens: 0,
+        cost: UsageCost {
+            input: 0.0,
+            output: 0.0,
+            cache_read: 0.0,
+            cache_write: 0.0,
+            total: 0.0,
+        },
+    }
+}
+/// 取当前时间的 Unix 毫秒数。
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }

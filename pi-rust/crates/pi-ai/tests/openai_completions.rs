@@ -1,12 +1,12 @@
 use pi_ai::api::openai_completions::{
-    ChatCompletionChunk, ChatMessage, ChunkUsage, CompletionTokensDetails, PromptTokensDetails,
-    build_request, convert_messages, map_stop_reason, parse_usage,
+    ChatCompletionChunk, ChatCompletionStream, ChatMessage, ChunkUsage, CompletionTokensDetails,
+    PromptTokensDetails, build_request, convert_messages, map_stop_reason, parse_usage,
 };
 use pi_ai::{
-    AssistantContent, AssistantMessage, AssistantRole, Context, ConversationMessage, ImageContent,
-    InputType, Model, ModelCost, ModelCostRates, ModelCostTier, StopReason, TextContent, Tool,
-    ToolCall, ToolResultContent, ToolResultMessage, ToolResultRole, Usage, UsageCost, UserContent,
-    UserMessage, UserMessageContent, UserRole, calculate_cost,
+    AssistantContent, AssistantMessage, AssistantMessageEvent, AssistantRole, Context,
+    ConversationMessage, ImageContent, InputType, Model, ModelCost, ModelCostRates, ModelCostTier,
+    StopReason, TextContent, Tool, ToolCall, ToolResultContent, ToolResultMessage, ToolResultRole,
+    Usage, UsageCost, UserContent, UserMessage, UserMessageContent, UserRole, calculate_cost,
 };
 use serde_json::json;
 
@@ -440,4 +440,106 @@ fn calculate_cost_applies_the_highest_matching_tier() {
     // 输入 2000 token 超过阈值 1000，整次请求按 6 美元/百万计。
     assert!((cost.input - 0.012).abs() < 1e-12);
     assert!((cost.output - 0.003).abs() < 1e-12);
+}
+
+// -----------------------------------------------------------------------------
+// 流式聚合测试
+// -----------------------------------------------------------------------------
+
+fn chunk(value: serde_json::Value) -> ChatCompletionChunk {
+    serde_json::from_value(value).unwrap()
+}
+
+fn done_message(events: &[AssistantMessageEvent]) -> AssistantMessage {
+    match events.last() {
+        Some(AssistantMessageEvent::Done { message, .. }) => message.clone(),
+        other => panic!("expected done as last event, got {other:?}"),
+    }
+}
+
+#[test]
+fn stream_aggregates_text_deltas() {
+    let mut stream = ChatCompletionStream::new(model());
+
+    let first = stream.handle_chunk(&chunk(json!({
+        "id": "cmpl_1",
+        "model": "gpt-4o-mini",
+        "choices": [{ "index": 0, "delta": { "role": "assistant", "content": "你好" } }]
+    })));
+    assert!(matches!(first[0], AssistantMessageEvent::TextStart { .. }));
+    assert!(matches!(first[1], AssistantMessageEvent::TextDelta { .. }));
+
+    let _ = stream.handle_chunk(&chunk(json!({
+        "choices": [{ "index": 0, "delta": { "content": "，世界" } }]
+    })));
+    let _ = stream.handle_chunk(&chunk(json!({
+        "id": "cmpl_1",
+        "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }],
+        "usage": { "prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14 }
+    })));
+
+    let events = stream.finish();
+    let message = done_message(&events);
+
+    assert_eq!(message.stop_reason, StopReason::Stop);
+    assert_eq!(message.response_id.as_deref(), Some("cmpl_1"));
+    assert_eq!(message.usage.input, 10);
+    assert_eq!(message.usage.output, 4);
+    match &message.content[0] {
+        AssistantContent::Text(text) => assert_eq!(text.text, "你好，世界"),
+        other => panic!("expected text, got {other:?}"),
+    }
+}
+
+#[test]
+fn stream_aggregates_tool_call_arguments() {
+    let mut stream = ChatCompletionStream::new(model());
+
+    let _ = stream.handle_chunk(&chunk(json!({
+        "choices": [{ "index": 0, "delta": { "tool_calls": [
+            { "index": 0, "id": "call_1", "type": "function",
+              "function": { "name": "read", "arguments": "{\"path\":" } }
+        ] } }]
+    })));
+    let _ = stream.handle_chunk(&chunk(json!({
+        "choices": [{ "index": 0, "delta": { "tool_calls": [
+            { "index": 0, "function": { "arguments": "\"a.txt\"}" } }
+        ] } }]
+    })));
+    let _ = stream.handle_chunk(&chunk(json!({
+        "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }]
+    })));
+
+    let events = stream.finish();
+    let message = done_message(&events);
+
+    assert_eq!(message.stop_reason, StopReason::ToolUse);
+    match &message.content[0] {
+        AssistantContent::ToolCall(call) => {
+            assert_eq!(call.id, "call_1");
+            assert_eq!(call.name, "read");
+            assert_eq!(call.arguments.get("path"), Some(&json!("a.txt")));
+        }
+        other => panic!("expected tool call, got {other:?}"),
+    }
+}
+
+#[test]
+fn stream_aggregates_reasoning_into_thinking_block() {
+    let mut stream = ChatCompletionStream::new(model());
+
+    let _ = stream.handle_chunk(&chunk(json!({
+        "choices": [{ "index": 0, "delta": { "reasoning_content": "先想" } }]
+    })));
+    let _ = stream.handle_chunk(&chunk(json!({
+        "choices": [{ "index": 0, "delta": { "reasoning_content": "再看" } }]
+    })));
+
+    let events = stream.finish();
+    let message = done_message(&events);
+
+    match &message.content[0] {
+        AssistantContent::Thinking(thinking) => assert_eq!(thinking.thinking, "先想再看"),
+        other => panic!("expected thinking, got {other:?}"),
+    }
 }
