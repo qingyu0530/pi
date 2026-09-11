@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::api::http::{HttpError, HttpRequest, HttpTransport};
 use crate::content::{
     AssistantContent, TextContent, ThinkingContent, ToolCall, ToolResultContent, UserContent,
 };
@@ -22,6 +23,7 @@ use crate::message::{
     UsageCost, UserMessage, UserMessageContent,
 };
 use crate::model::{Model, calculate_cost};
+use crate::provider::Provider;
 
 /// `POST /chat/completions` 的请求体。
 ///
@@ -527,12 +529,12 @@ pub struct ChatCompletionStream {
     model: Model,
     response_id: Option<String>, // 服务端返回的本次补全 id（第一个 chunk 里取）
     response_model: Option<String>, // 实际服务的模型名（网关可能路由到不同模型）。
-    usage: Usage, // token 用量 + 费用，拿到最后一个 chunk 的 usage 后填
+    usage: Usage,                // token 用量 + 费用，拿到最后一个 chunk 的 usage 后填
     stop_reason: StopReason,
     raw_stop_reason: Option<String>,
     error_message: Option<String>,
     has_finish_reason: bool, // 是否收到过 finish_reason
-    blocks: Vec<Block>, // 累积的内容块列表，顺序即最终顺序
+    blocks: Vec<Block>,      // 累积的内容块列表，顺序即最终顺序
     text_block: Option<usize>,
     thinking_block: Option<usize>,
     tool_blocks: HashMap<u32, usize>,
@@ -614,7 +616,7 @@ impl ChatCompletionStream {
             }
             self.has_finish_reason = true;
         }
-        // delta 是这一 chunk 的增量内容，结束 chunk 可能没有 delta 
+        // delta 是这一 chunk 的增量内容，结束 chunk 可能没有 delta
         let Some(delta) = &choice.delta else {
             return events;
         };
@@ -632,9 +634,9 @@ impl ChatCompletionStream {
     2.处理结束原因（finish_reason → stop_reason）；
     3.把 delta 分派给文本/推理/工具三个处理器；
     4.返回本次产生的事件。
-    
+
     它自己不直接改内容，内容修改都在 handle_text/handle_thinking/handle_tool_calls 里。
-    
+
     */
 
     /// 处理文本增量。
@@ -650,7 +652,8 @@ impl ChatCompletionStream {
 
         let index = match self.text_block {
             Some(index) => index, // 已经有文本块了，直接用它
-            None => { // 还没有，说明这是第一片文本，要新建
+            None => {
+                // 还没有，说明这是第一片文本，要新建
                 self.blocks.push(Block::Text(String::new()));
                 let index = self.blocks.len() - 1;
                 self.text_block = Some(index);
@@ -772,7 +775,8 @@ impl ChatCompletionStream {
     pub fn finish(&mut self) -> Vec<AssistantMessageEvent> {
         let mut events = Vec::new();
         for (index, block) in self.blocks.iter().enumerate() {
-            match block { // 按块类型发 end
+            match block {
+                // 按块类型发 end
                 // 文本/思考：content 是累积后的完整文本（不是片段
                 Block::Text(text) => events.push(AssistantMessageEvent::TextEnd {
                     content_index: index as u32,
@@ -939,4 +943,141 @@ fn now_millis() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
+}
+
+// -----------------------------------------------------------------------------
+// Provider：把「构造请求 → 传输 → 聚合」串起来
+// -----------------------------------------------------------------------------
+
+/// 基于 OpenAI-compatible Chat Completions 的 Provider。
+///
+/// 它持有一个 HTTP 传输层；`stream` 时构造请求、发送、把 SSE 响应聚合成事件。
+pub struct OpenAiCompletionsProvider {
+    transport: Box<dyn HttpTransport>,
+    api_key: String,
+}
+
+impl OpenAiCompletionsProvider {
+    /// 用传输层和 API Key 创建 Provider。
+    #[must_use]
+    pub fn new(transport: Box<dyn HttpTransport>, api_key: impl Into<String>) -> Self {
+        Self {
+            transport,
+            api_key: api_key.into(),
+        }
+    }
+    // 调用你之前写好的请求体转换，得到 ChatRequest。
+    /// 构造发给 `/chat/completions` 的 HTTP 请求。
+    fn build_http_request(
+        &self,
+        model: &Model,
+        context: &Context,
+    ) -> Result<HttpRequest, HttpError> {
+        let body = serde_json::to_string(&build_request(model, context))
+            .map_err(|error| HttpError::new(format!("序列化请求失败: {error}")))?;
+        let url = format!("{}/chat/completions", model.base_url.trim_end_matches('/'));
+        Ok(HttpRequest {
+            url,
+            headers: vec![
+                ("Content-Type".to_owned(), "application/json".to_owned()),
+                (
+                    "Authorization".to_owned(),
+                    format!("Bearer {}", self.api_key),
+                ),
+            ],
+            body,
+        })
+    }
+
+    /// 发请求并把 SSE 响应体聚合成事件；失败时返回单个 error 事件。
+    /// 发送成功 → aggregate_sse 把响应体聚合成事件
+    /// 实际含义：把所有失败都收敛成「一个 error 事件」，
+    /// 这样上层（Agent）不用区分错误类型，统一在事件流里看到错误。
+    fn run(&self, model: &Model, context: &Context) -> Vec<AssistantMessageEvent> {
+        let request = match self.build_http_request(model, context) {
+            Ok(request) => request,
+            Err(error) => return vec![error_event(model, &error.message)],
+        };
+        match self.transport.post(&request) {
+            Ok(body) => aggregate_sse(model, &body),
+            Err(error) => vec![error_event(model, &error.message)],
+        }
+    }
+}
+
+impl Provider for OpenAiCompletionsProvider {
+    fn id(&self) -> &str {
+        "openai-completions"
+    }
+
+    fn name(&self) -> &str {
+        "OpenAI-compatible Chat Completions"
+    }
+
+    fn get_models(&self) -> &[Model] {
+        &[]
+    }
+
+    fn stream(
+        &self,
+        model: &Model,
+        context: &Context,
+    ) -> Box<dyn Iterator<Item = AssistantMessageEvent>> {
+        Box::new(self.run(model, context).into_iter())
+    }
+}
+
+/// 把一段 SSE 响应体聚合成事件序列。
+///
+/// 逐行读：以 `data:` 开头的行取出 JSON，解析成 chunk 喂给聚合器；
+/// 遇到 `[DONE]` 或读完即结束。
+#[must_use]
+pub fn aggregate_sse(model: &Model, body: &str) -> Vec<AssistantMessageEvent> {
+    let mut stream = ChatCompletionStream::new(model.clone());
+    let mut events = vec![stream.start_event()];
+    for line in body.lines() {
+        let Some(payload) = parse_sse_data(line) else {
+            continue;
+        };
+        if payload == "[DONE]" {
+            break;
+        }
+        if let Ok(chunk) = serde_json::from_str::<ChatCompletionChunk>(payload) {
+            events.extend(stream.handle_chunk(&chunk));
+        }
+    }
+    events.extend(stream.finish());
+    events
+}
+
+/// 从 SSE 行里取出 `data:` 后面的内容；不是数据行或为空时返回 `None`。
+fn parse_sse_data(line: &str) -> Option<&str> {
+    line.strip_prefix("data:")
+        .map(str::trim)
+        .filter(|payload| !payload.is_empty())
+}
+
+/// 构造一个只带错误信息的助手消息，用于传输/解析失败时。
+fn error_event(model: &Model, message: &str) -> AssistantMessageEvent {
+    let error = AssistantMessage {
+        role: AssistantRole::Assistant,
+        content: Vec::new(),
+        api: model.api.clone(),
+        provider: model.provider.clone(),
+        model: model.id.clone(),
+        response_model: None,
+        response_id: None,
+        diagnostics: None,
+        usage: zero_usage(),
+        stop_reason: StopReason::Error,
+        deferred: None,
+        error_message: Some(message.to_owned()),
+        raw_stop_reason: None,
+        end_turn: None,
+        timestamp: now_millis(),
+    };
+    AssistantMessageEvent::Error {
+        reason: StopReason::Error,
+        error,
+    }
 }

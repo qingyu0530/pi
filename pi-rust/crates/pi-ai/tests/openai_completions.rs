@@ -1,14 +1,19 @@
+use pi_ai::api::http::{HttpError, HttpRequest, HttpTransport};
 use pi_ai::api::openai_completions::{
     ChatCompletionChunk, ChatCompletionStream, ChatMessage, ChunkUsage, CompletionTokensDetails,
-    PromptTokensDetails, build_request, convert_messages, map_stop_reason, parse_usage,
+    OpenAiCompletionsProvider, PromptTokensDetails, build_request, convert_messages,
+    map_stop_reason, parse_usage,
 };
 use pi_ai::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, AssistantRole, Context,
     ConversationMessage, ImageContent, InputType, Model, ModelCost, ModelCostRates, ModelCostTier,
-    StopReason, TextContent, Tool, ToolCall, ToolResultContent, ToolResultMessage, ToolResultRole,
-    Usage, UsageCost, UserContent, UserMessage, UserMessageContent, UserRole, calculate_cost,
+    Provider, StopReason, TextContent, Tool, ToolCall, ToolResultContent, ToolResultMessage,
+    ToolResultRole, Usage, UsageCost, UserContent, UserMessage, UserMessageContent, UserRole,
+    calculate_cost,
 };
 use serde_json::json;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 fn model() -> Model {
     Model {
@@ -541,5 +546,134 @@ fn stream_aggregates_reasoning_into_thinking_block() {
     match &message.content[0] {
         AssistantContent::Thinking(thinking) => assert_eq!(thinking.thinking, "先想再看"),
         other => panic!("expected thinking, got {other:?}"),
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Provider 组装测试（用假传输层，不联网）
+// -----------------------------------------------------------------------------
+
+/// 记录请求、返回固定响应体的假传输层。
+#[derive(Clone)]
+struct FakeTransport {
+    body: String,
+    request: Rc<RefCell<Option<HttpRequest>>>,
+}
+
+impl FakeTransport {
+    fn new(body: &str) -> Self {
+        Self {
+            body: body.to_owned(),
+            request: Rc::new(RefCell::new(None)),
+        }
+    }
+
+    fn request(&self) -> Option<HttpRequest> {
+        self.request.borrow().clone()
+    }
+}
+
+impl HttpTransport for FakeTransport {
+    fn post(&self, request: &HttpRequest) -> Result<String, HttpError> {
+        *self.request.borrow_mut() = Some(request.clone());
+        Ok(self.body.clone())
+    }
+}
+
+/// 总是失败的假传输层。
+struct FailingTransport;
+
+impl HttpTransport for FailingTransport {
+    fn post(&self, _request: &HttpRequest) -> Result<String, HttpError> {
+        Err(HttpError::new("connection refused"))
+    }
+}
+
+#[test]
+fn provider_streams_text_from_sse_body() {
+    let body = concat!(
+        "data: {\"id\":\"cmpl_1\",\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"你好\"}}]}\n\n",
+        "data: {\"id\":\"cmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"，世界\"}}]}\n\n",
+        "data: {\"id\":\"cmpl_1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let provider = OpenAiCompletionsProvider::new(Box::new(FakeTransport::new(body)), "test-key");
+    let context = Context {
+        system_prompt: None,
+        messages: vec![user_text("hi").into()],
+        tools: None,
+    };
+
+    let events: Vec<AssistantMessageEvent> = provider.stream(&model(), &context).collect();
+
+    assert!(matches!(
+        events.first(),
+        Some(AssistantMessageEvent::Start { .. })
+    ));
+    let message = done_message(&events);
+    assert_eq!(message.stop_reason, StopReason::Stop);
+    match &message.content[0] {
+        AssistantContent::Text(text) => assert_eq!(text.text, "你好，世界"),
+        other => panic!("expected text, got {other:?}"),
+    }
+}
+
+#[test]
+fn provider_builds_request_url_headers_and_body() {
+    let transport = FakeTransport::new("data: [DONE]\n\n");
+    let provider = OpenAiCompletionsProvider::new(Box::new(transport.clone()), "test-key");
+    let context = Context {
+        system_prompt: Some("sys".to_owned()),
+        messages: vec![user_text("hi").into()],
+        tools: None,
+    };
+
+    let _: Vec<AssistantMessageEvent> = provider.stream(&model(), &context).collect();
+
+    let request = transport
+        .request()
+        .expect("transport should receive a request");
+    assert_eq!(request.url, "https://api.openai.com/v1/chat/completions");
+    assert!(
+        request
+            .headers
+            .iter()
+            .any(|(name, value)| name == "Authorization" && value == "Bearer test-key")
+    );
+    assert!(
+        request
+            .headers
+            .iter()
+            .any(|(name, value)| name == "Content-Type" && value == "application/json")
+    );
+
+    let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(body["stream"], json!(true));
+    assert_eq!(body["model"], json!("gpt-4o-mini"));
+    assert_eq!(body["messages"][0]["role"], json!("system"));
+}
+
+#[test]
+fn provider_emits_error_event_on_transport_failure() {
+    let provider = OpenAiCompletionsProvider::new(Box::new(FailingTransport), "test-key");
+    let context = Context {
+        system_prompt: None,
+        messages: vec![user_text("hi").into()],
+        tools: None,
+    };
+
+    let events: Vec<AssistantMessageEvent> = provider.stream(&model(), &context).collect();
+
+    match events.last() {
+        Some(AssistantMessageEvent::Error { error, .. }) => {
+            assert!(
+                error
+                    .error_message
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("connection refused")
+            );
+        }
+        other => panic!("expected error event, got {other:?}"),
     }
 }
