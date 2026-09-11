@@ -8,6 +8,7 @@
 //!   Agent 持有 Box<dyn Provider> ≈ 持有一个抽象基类指针，
 //!   运行时才决定具体用哪个子类（FauxProvider 或真实 Provider）。
 
+mod compaction;
 mod environment;
 mod event;
 mod session;
@@ -15,6 +16,11 @@ mod tool;
 mod tools;
 mod truncate;
 
+pub use compaction::{
+    CompactionError, CompactionPlan, CompactionResult, CompactionSettings,
+    DEFAULT_COMPACTION_SETTINGS, build_summary_prompt, compact, estimate_context_tokens,
+    estimate_tokens, plan_compaction, should_compact,
+};
 pub use environment::{EnvError, Environment, RealEnvironment};
 pub use event::AgentEvent;
 pub use session::{Entry, Session, SessionError};

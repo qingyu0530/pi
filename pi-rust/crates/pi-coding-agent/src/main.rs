@@ -79,8 +79,8 @@ fn build_agent() -> (Agent, String) {
 
 /// CLI 会话：组合 Agent、会话日志、环境与文件路径。
 struct Cli {
-    agent: Agent, // 对话运行时
-    session: Session, // 会话日志
+    agent: Agent,         // 对话运行时
+    session: Session,     // 会话日志
     env: RealEnvironment, // 真实文件系统
     session_path: String, // 会话文件路径
     model_label: String,

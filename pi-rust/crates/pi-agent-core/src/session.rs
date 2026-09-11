@@ -49,7 +49,7 @@ pub enum Entry {
     /// 一条对话消息。
     Message {
         id: String, // 本条记录唯一 id
-        seq: u64, // 递增序号
+        seq: u64,   // 递增序号
         #[serde(rename = "parentId")]
         parent_id: Option<String>, // 上一条记录的 id（链）
         timestamp: u64,
