@@ -328,7 +328,7 @@ impl Agent {
         .map_err(|error| AgentError::Compaction(error.message))?;
 
         // 用「摘要 + 保留的近期消息」替换原来的全部消息。
-        let mut new_messages = Vec::with_capacity(result.retained_tail.len() + 1);// 预分配容量，减少扩容
+        let mut new_messages = Vec::with_capacity(result.retained_tail.len() + 1); // 预分配容量，减少扩容
         new_messages.push(summary_message(&result.summary)); // 第一条放摘要
         new_messages.extend(result.retained_tail.iter().cloned()); // 把保留的近期消息接上去
         self.messages = new_messages; // 整体替换（这就是「替代」）。
