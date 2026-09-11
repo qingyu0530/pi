@@ -10,12 +10,14 @@
 
 mod environment;
 mod event;
+mod session;
 mod tool;
 mod tools;
 mod truncate;
 
 pub use environment::{EnvError, Environment, RealEnvironment};
 pub use event::AgentEvent;
+pub use session::{Entry, Session, SessionError};
 pub use tool::{AgentTool, EchoTool, ToolError, ToolResult};
 pub use tools::{EditTool, ReadTool, WriteTool};
 
