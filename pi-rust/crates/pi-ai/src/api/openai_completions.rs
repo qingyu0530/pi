@@ -27,7 +27,7 @@ use crate::message::{
     UsageCost, UserMessage, UserMessageContent,
 };
 use crate::model::{Model, calculate_cost};
-use crate::provider::Provider;
+use crate::provider::{Provider, RequestOptions};
 
 /// `POST /chat/completions` 的请求体。
 ///
@@ -199,15 +199,17 @@ pub struct ChatFunctionDef {
 
 /// 把 pi 的模型和上下文翻译成 OpenAI 请求体。
 /// 把 pi 的 Model + Context（内存对象）翻译成一份可以直接 POST /chat/completions 的 JSON 请求体
-/// 
+/// 请求构造函数多收一个「本次选项」，这样它才能把温度、上限写进请求体
 #[must_use]
-pub fn build_request(model: &Model, context: &Context) -> ChatRequest {
+pub fn build_request(model: &Model, context: &Context, options: &RequestOptions) -> ChatRequest {
     // 解析一次，后面复用
     let compat = resolve_openai_completions_compat(model);
+    // 请求选项里的 max_tokens 优先，否则用模型默认。
+    let max_tokens_value = options.max_tokens.unwrap_or(model.max_tokens);
     // 按兼容设置选择最大 token 字段名：新接口用 max_completion_tokens，老接口用 max_tokens。
     let (max_completion_tokens, max_tokens) = match compat.max_tokens_field {
-        MaxTokensField::MaxTokens => (None, Some(model.max_tokens)),
-        MaxTokensField::MaxCompletionTokens => (Some(model.max_tokens), None),
+        MaxTokensField::MaxTokens => (None, Some(max_tokens_value)),
+        MaxTokensField::MaxCompletionTokens => (Some(max_tokens_value), None),
     };
     // Vercel 只有在设了 only/order 时才发 providerOptions。
     // 这个模型有没有 Vercel 路由配置，而且里面真的写了规则
@@ -230,7 +232,7 @@ pub fn build_request(model: &Model, context: &Context) -> ChatRequest {
         // 把上一步算好的 Vercel 路由，和 OpenRouter 的路由，分别放进请求体的两个字段。
         provider: compat.open_router_routing.clone(),
         provider_options,
-        temperature: None,
+        temperature: options.temperature,
         // 把 Context 里的工具列表逐条翻译成 OpenAI 的工具定义；每条都要把 compat 传进去，因为「要不要带 strict」取决于 compat
         tools: context.tools.as_ref().map(|tools| {
             tools
@@ -1077,12 +1079,14 @@ impl OpenAiCompletionsProvider {
     }
     // 调用你之前写好的请求体转换，得到 ChatRequest。
     /// 构造发给 `/chat/completions` 的 HTTP 请求。
+    /// 把请求体序列化成 JSON 字符串。改动就是把 options 继续往下传给 build_request。这是一层中转
     fn build_http_request(
         &self,
         model: &Model,
         context: &Context,
+        options: &RequestOptions,
     ) -> Result<HttpRequest, HttpError> {
-        let body = serde_json::to_string(&build_request(model, context))
+        let body = serde_json::to_string(&build_request(model, context, options))
             .map_err(|error| HttpError::new(format!("序列化请求失败: {error}")))?;
         let url = format!("{}/chat/completions", model.base_url.trim_end_matches('/'));
         Ok(HttpRequest {
@@ -1102,8 +1106,14 @@ impl OpenAiCompletionsProvider {
     /// 发送成功 → aggregate_sse 把响应体聚合成事件
     /// 实际含义：把所有失败都收敛成「一个 error 事件」，
     /// 这样上层（Agent）不用区分错误类型，统一在事件流里看到错误。
-    fn run(&self, model: &Model, context: &Context) -> Vec<AssistantMessageEvent> {
-        let request = match self.build_http_request(model, context) {
+    /// 发请求并聚合
+    fn run(
+        &self,
+        model: &Model,
+        context: &Context,
+        options: &RequestOptions,
+    ) -> Vec<AssistantMessageEvent> {
+        let request = match self.build_http_request(model, context, options) {
             Ok(request) => request,
             Err(error) => return vec![error_event(model, &error.message)],
         };
@@ -1126,13 +1136,14 @@ impl Provider for OpenAiCompletionsProvider {
     fn get_models(&self) -> &[Model] {
         &[]
     }
-
+    // 接口实现，把 run 返回的 Vec 变成装箱迭代器。改动就是把 options 一路传进来。
     fn stream(
         &self,
         model: &Model,
         context: &Context,
+        options: &RequestOptions,
     ) -> Box<dyn Iterator<Item = AssistantMessageEvent>> {
-        Box::new(self.run(model, context).into_iter())
+        Box::new(self.run(model, context, options).into_iter())
     }
 }
 

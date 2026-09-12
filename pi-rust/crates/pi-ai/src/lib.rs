@@ -47,7 +47,7 @@ pub use model::{
     ImagesModel, InputType, Model, ModelCompat, ModelThinkingLevel, ThinkingLevel,
     ThinkingLevelMap, calculate_cost,
 };
-pub use provider::{FauxProvider, FauxResponse, Provider};
+pub use provider::{FauxProvider, FauxResponse, Provider, RequestOptions};
 
 // API 协议层与真实传输
 pub use api::http::{HttpError, HttpRequest, HttpTransport};

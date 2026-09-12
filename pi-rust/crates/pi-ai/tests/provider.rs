@@ -1,6 +1,7 @@
 use pi_ai::{
     AssistantMessageEvent, Context, FauxProvider, FauxResponse, InputType, Model, ModelCost,
-    ModelCostRates, Provider, StopReason, UserMessage, UserMessageContent, UserRole,
+    ModelCostRates, Provider, RequestOptions, StopReason, UserMessage, UserMessageContent,
+    UserRole,
 };
 
 fn faux_model() -> Model {
@@ -47,7 +48,9 @@ fn faux_provider_emits_start_text_and_done() {
         tools: None,
     };
 
-    let events: Vec<AssistantMessageEvent> = provider.stream(model, &context).collect();
+    let events: Vec<AssistantMessageEvent> = provider
+        .stream(model, &context, &RequestOptions::default())
+        .collect();
 
     // 第一件事必须是 start。
     assert!(matches!(events[0], AssistantMessageEvent::Start { .. }));
@@ -86,7 +89,9 @@ fn faux_provider_emits_scripted_tool_call() {
         tools: None,
     };
 
-    let events: Vec<AssistantMessageEvent> = provider.stream(model, &context).collect();
+    let events: Vec<AssistantMessageEvent> = provider
+        .stream(model, &context, &RequestOptions::default())
+        .collect();
 
     assert!(matches!(events[0], AssistantMessageEvent::Start { .. }));
     assert!(

@@ -29,7 +29,7 @@ pub use tools::{EditTool, ReadTool, WriteTool};
 
 use pi_ai::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, Context, ConversationMessage, Model,
-    Provider, StopReason, ToolCall, ToolResultMessage, ToolResultRole, UserMessage,
+    Provider, RequestOptions, StopReason, ToolCall, ToolResultMessage, ToolResultRole, UserMessage,
     UserMessageContent, UserRole,
 };
 use serde_json::Value;
@@ -65,6 +65,7 @@ pub struct Agent {
     system_prompt: Option<String>,
     tools: Vec<Box<dyn AgentTool>>,
     messages: Vec<ConversationMessage>,
+    options: RequestOptions,
 }
 
 impl Agent {
@@ -77,6 +78,7 @@ impl Agent {
             system_prompt: None,
             tools: Vec::new(),
             messages: Vec::new(),
+            options: RequestOptions::default(),
         }
     }
 
@@ -84,6 +86,13 @@ impl Agent {
     #[must_use]
     pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = Some(prompt.into());
+        self
+    }
+
+    /// 设置本次会话的请求选项（温度、最大 token 等）。
+    #[must_use]
+    pub fn with_options(mut self, options: RequestOptions) -> Self {
+        self.options = options;
         self
     }
 
@@ -123,7 +132,7 @@ impl Agent {
         };
 
         let mut final_message = None;
-        for event in self.provider.stream(&self.model, &context) {
+        for event in self.provider.stream(&self.model, &context, &self.options) {
             match &event {
                 // 流开始：对应一条助手消息开始。
                 AssistantMessageEvent::Start { partial } => {
@@ -373,7 +382,7 @@ fn summarize_with_provider(
 
     let mut summary = String::new();
     let mut done = false;
-    for event in provider.stream(model, &context) {
+    for event in provider.stream(model, &context, &RequestOptions::default()) {
         match event {
             AssistantMessageEvent::Done { message, .. } => {
                 for block in message.content {
@@ -420,9 +429,9 @@ mod tests {
     use pi_ai::{
         AssistantContent, AssistantMessage, AssistantMessageEvent, AssistantRole, Context,
         ConversationMessage, FauxProvider, FauxResponse, InputType, Model, ModelCost,
-        ModelCostRates, Provider, StopReason, TextContent, ToolCall, ToolResultContent,
-        ToolResultMessage, ToolResultRole, Usage, UsageCost, UserMessage, UserMessageContent,
-        UserRole,
+        ModelCostRates, Provider, RequestOptions, StopReason, TextContent, ToolCall,
+        ToolResultContent, ToolResultMessage, ToolResultRole, Usage, UsageCost, UserMessage,
+        UserMessageContent, UserRole,
     };
     use serde_json::{Map, Value};
 
@@ -446,6 +455,7 @@ mod tests {
             &self,
             _model: &Model,
             _context: &Context,
+            _options: &RequestOptions,
         ) -> Box<dyn Iterator<Item = AssistantMessageEvent>> {
             Box::new(std::iter::empty())
         }
@@ -471,6 +481,7 @@ mod tests {
             &self,
             _model: &Model,
             _context: &Context,
+            _options: &RequestOptions,
         ) -> Box<dyn Iterator<Item = AssistantMessageEvent>> {
             let message = tool_call_message("call", "echo", Map::new());
             let events = vec![

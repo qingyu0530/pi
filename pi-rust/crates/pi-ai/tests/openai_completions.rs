@@ -8,9 +8,9 @@ use pi_ai::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, AssistantRole, Context,
     ConversationMessage, ImageContent, InputType, MaxTokensField, Model, ModelCompat, ModelCost,
     ModelCostRates, ModelCostTier, OpenAICompletionsCompat, OpenRouterRouting, Provider,
-    StopReason, TextContent, Tool, ToolCall, ToolResultContent, ToolResultMessage, ToolResultRole,
-    Usage, UsageCost, UserContent, UserMessage, UserMessageContent, UserRole, VercelGatewayRouting,
-    calculate_cost, detect_openai_completions_compat,
+    RequestOptions, StopReason, TextContent, Tool, ToolCall, ToolResultContent, ToolResultMessage,
+    ToolResultRole, Usage, UsageCost, UserContent, UserMessage, UserMessageContent, UserRole,
+    VercelGatewayRouting, calculate_cost, detect_openai_completions_compat,
 };
 use serde_json::json;
 use std::cell::RefCell;
@@ -100,13 +100,35 @@ fn context(system_prompt: Option<&str>, messages: Vec<ConversationMessage>) -> C
 
 #[test]
 fn request_has_model_stream_and_usage_option() {
-    let request = build_request(&model(), &context(None, vec![user_text("hi").into()]));
+    let request = build_request(
+        &model(),
+        &context(None, vec![user_text("hi").into()]),
+        &RequestOptions::default(),
+    );
     let value = serde_json::to_value(request).unwrap();
 
     assert_eq!(value["model"], "gpt-4o-mini");
     assert_eq!(value["stream"], true);
     assert_eq!(value["stream_options"]["include_usage"], true);
     assert_eq!(value["max_completion_tokens"], 1_024);
+}
+
+#[test]
+fn request_uses_options_temperature_and_max_tokens() {
+    let options = RequestOptions {
+        temperature: Some(0.7),
+        max_tokens: Some(42),
+    };
+    let request = build_request(
+        &model(),
+        &context(None, vec![user_text("hi").into()]),
+        &options,
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(value["temperature"], 0.7);
+    // request options 覆盖模型默认 max_tokens（1024）。
+    assert_eq!(value["max_completion_tokens"], 42);
 }
 
 #[test]
@@ -244,7 +266,7 @@ fn tools_are_serialized_as_function_tools() {
         }]),
     };
 
-    let request = build_request(&model(), &context);
+    let request = build_request(&model(), &context, &RequestOptions::default());
     let value = serde_json::to_value(request).unwrap();
 
     assert_eq!(
@@ -610,7 +632,9 @@ fn provider_streams_text_from_sse_body() {
         tools: None,
     };
 
-    let events: Vec<AssistantMessageEvent> = provider.stream(&model(), &context).collect();
+    let events: Vec<AssistantMessageEvent> = provider
+        .stream(&model(), &context, &RequestOptions::default())
+        .collect();
 
     assert!(matches!(
         events.first(),
@@ -634,7 +658,9 @@ fn provider_builds_request_url_headers_and_body() {
         tools: None,
     };
 
-    let _: Vec<AssistantMessageEvent> = provider.stream(&model(), &context).collect();
+    let _: Vec<AssistantMessageEvent> = provider
+        .stream(&model(), &context, &RequestOptions::default())
+        .collect();
 
     let request = transport
         .request()
@@ -668,7 +694,9 @@ fn provider_emits_error_event_on_transport_failure() {
         tools: None,
     };
 
-    let events: Vec<AssistantMessageEvent> = provider.stream(&model(), &context).collect();
+    let events: Vec<AssistantMessageEvent> = provider
+        .stream(&model(), &context, &RequestOptions::default())
+        .collect();
 
     match events.last() {
         Some(AssistantMessageEvent::Error { error, .. }) => {
@@ -707,7 +735,11 @@ fn with_compat(model: &mut Model, compat: OpenAICompletionsCompat) {
 
 #[test]
 fn standard_provider_uses_max_completion_tokens_and_store() {
-    let request = build_request(&model(), &context(None, vec![user_text("hi").into()]));
+    let request = build_request(
+        &model(),
+        &context(None, vec![user_text("hi").into()]),
+        &RequestOptions::default(),
+    );
     let value = serde_json::to_value(request).unwrap();
 
     assert!(value.get("max_completion_tokens").is_some());
@@ -722,7 +754,11 @@ fn deepseek_provider_uses_max_tokens_and_omits_store() {
     deepseek.provider = "deepseek".to_owned();
     deepseek.base_url = "https://api.deepseek.com/v1".to_owned();
 
-    let request = build_request(&deepseek, &context(None, vec![user_text("hi").into()]));
+    let request = build_request(
+        &deepseek,
+        &context(None, vec![user_text("hi").into()]),
+        &RequestOptions::default(),
+    );
     let value = serde_json::to_value(request).unwrap();
 
     // DeepSeek 被探测为非标准：用 max_tokens，且不发 store。
@@ -826,7 +862,11 @@ fn openrouter_routing_serialized_into_provider_field() {
         },
     );
 
-    let request = build_request(&routed, &context(None, vec![user_text("hi").into()]));
+    let request = build_request(
+        &routed,
+        &context(None, vec![user_text("hi").into()]),
+        &RequestOptions::default(),
+    );
     let value = serde_json::to_value(request).unwrap();
 
     assert_eq!(value["provider"]["only"], json!(["anthropic"]));
@@ -846,7 +886,11 @@ fn vercel_gateway_routing_wrapped_in_provider_options() {
         },
     );
 
-    let request = build_request(&routed, &context(None, vec![user_text("hi").into()]));
+    let request = build_request(
+        &routed,
+        &context(None, vec![user_text("hi").into()]),
+        &RequestOptions::default(),
+    );
     let value = serde_json::to_value(request).unwrap();
 
     assert_eq!(

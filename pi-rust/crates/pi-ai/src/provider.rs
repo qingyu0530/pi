@@ -22,6 +22,19 @@ use crate::message::{
 };
 use crate::model::Model;
 
+/// 一次模型请求的可选参数。
+///
+/// 由调用方（Agent / CLI）填充，Provider 读取后影响构造出的请求。
+/// 现在只有采样相关的两个字段，后续会加 `reasoning_effort`、`session_id`、缓存策略等。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RequestOptions {
+    /// 采样温度；`None` 表示用服务端默认。
+    /// 温度控制的是模型每次选下一个词时有多随机
+    pub temperature: Option<f64>,
+    /// 覆盖模型默认的最大输出 token；`None` 表示用 `Model.max_tokens`。
+    pub max_tokens: Option<u64>,
+}
+
 /// 运行时单元：持有模型目录，并把一次请求转换成流式事件。
 /// 把一次对话请求真正变成 模型回复的那个执行者
 /*
@@ -48,10 +61,13 @@ pub trait Provider {
     /// 返回的是 Box<dyn Iterator<...>>——一个“被装箱的泛型迭代器对象”。
     /// 调用方只需 next() 逐个取出事件，不关心底层是 Vec 还是别的来源。
     /// C++ 对照：类似一个返回生成器/范围的虚函数。
+    /// 
+    /// 把「请求选项」作为第三个参数加进 Provider 接口。从此每个 Provider 实现、每个调用方都要带上它。
     fn stream(
         &self,
         model: &Model,
         context: &Context,
+        options: &RequestOptions,
     ) -> Box<dyn Iterator<Item = AssistantMessageEvent>>;
 }
 
@@ -146,11 +162,12 @@ impl Provider for FauxProvider {
     fn get_models(&self) -> &[Model] {
         &self.models
     }
-
+    // 让 FauxProvider 满足新接口，但它不用这些选项
     fn stream(
         &self,
         model: &Model,
         context: &Context,
+        _options: &RequestOptions,
     ) -> Box<dyn Iterator<Item = AssistantMessageEvent>> {
         let scripted = self.script.borrow_mut().pop_front();
         let events = match scripted {
