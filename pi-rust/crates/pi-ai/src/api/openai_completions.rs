@@ -13,6 +13,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::api::http::{HttpError, HttpRequest, HttpTransport};
+use crate::api::openai_compat::{
+    ResolvedOpenAICompletionsCompat, resolve_openai_completions_compat,
+};
+use crate::compat::MaxTokensField;
 use crate::content::{
     AssistantContent, TextContent, ThinkingContent, ToolCall, ToolResultContent, UserContent,
 };
@@ -43,6 +47,12 @@ pub struct ChatRequest {
     /// 本次最多生成多少 token（OpenAI 新字段名）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_completion_tokens: Option<u64>,
+    /// 本次最多生成多少 token（老字段名，部分兼容服务商仍在使用）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+    /// 是否让服务端存储本次请求（`false` 表示不存）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store: Option<bool>,
     /// 采样温度，越大输出越随机。
     /// 控制模型输出有多随机
     /// 模型每一步不是直接输出一个词，而是先算出所有候选词的概率分布。温度 T 在归一化成概率之前缩放这些分数（logits）
@@ -72,6 +82,10 @@ pub enum ChatMessage {
     #[serde(rename = "system")]
     System { content: String },
 
+    /// 系统提示的另一种角色名，部分新模型（推理模型）要求用 `developer`。
+    #[serde(rename = "developer")]
+    Developer { content: String },
+
     /// 用户输入：纯文本，或文本 + 图片的内容块数组。
     #[serde(rename = "user")]
     User { content: ChatUserContent },
@@ -90,6 +104,9 @@ pub enum ChatMessage {
     Tool {
         tool_call_id: String,
         content: String,
+        /// 部分 Provider 要求工具结果带工具名。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
     },
 }
 
@@ -167,14 +184,23 @@ pub struct ChatFunctionDef {
 /// 把 pi 的模型和上下文翻译成 OpenAI 请求体。
 #[must_use]
 pub fn build_request(model: &Model, context: &Context) -> ChatRequest {
+    // 解析一次，后面复用
+    let compat = resolve_openai_completions_compat(model);
+    // 按兼容设置选择最大 token 字段名：新接口用 max_completion_tokens，老接口用 max_tokens。
+    let (max_completion_tokens, max_tokens) = match compat.max_tokens_field {
+        MaxTokensField::MaxTokens => (None, Some(model.max_tokens)),
+        MaxTokensField::MaxCompletionTokens => (Some(model.max_tokens), None),
+    };
     ChatRequest {
         model: model.id.clone(),
-        messages: convert_messages(context),
+        messages: convert_messages(model, context),
         stream: true,
-        stream_options: Some(StreamOptions {
+        stream_options: compat.supports_usage_in_streaming.then_some(StreamOptions {
             include_usage: true,
         }),
-        max_completion_tokens: Some(model.max_tokens),
+        max_completion_tokens,
+        max_tokens,
+        store: compat.supports_store.then_some(false),
         temperature: None,
         tools: context
             .tools
@@ -187,24 +213,56 @@ pub fn build_request(model: &Model, context: &Context) -> ChatRequest {
 ///
 /// 顺序很关键：system 在最前；`assistant` 的工具调用后面必须紧跟
 /// 对应的 `tool` 消息，否则服务端会拒绝。
+///
+/// 按兼容设置处理两件事：
+/// - 系统提示用 `system` 还是 `developer` 角色（推理模型可能要求后者）；
+/// - 工具结果后紧跟用户消息时，是否要插一条合成 assistant 消息。
 #[must_use]
-pub fn convert_messages(context: &Context) -> Vec<ChatMessage> {
+pub fn convert_messages(model: &Model, context: &Context) -> Vec<ChatMessage> {
+    // 先解析出这家的兼容设置。后面判断「角色名」「是否插 assistant」「工具结果带不带 name」都用它。
+    // 两个条件都要满足。model.reasoning 表示这是推理模型；supports_developer_role 表示服务商接受 developer 角色。只有都真，系统提示才用 developer，否则用 system。
+    let compat = resolve_openai_completions_compat(model);
+    let use_developer_role = model.reasoning && compat.supports_developer_role;
     let mut messages = Vec::new();
     if let Some(system_prompt) = &context.system_prompt {
-        messages.push(ChatMessage::System {
-            content: system_prompt.clone(),
+        messages.push(if use_developer_role {
+            ChatMessage::Developer {
+                content: system_prompt.clone(),
+            }
+        } else {
+            ChatMessage::System {
+                content: system_prompt.clone(),
+            }
         });
     }
+    let mut previous_was_tool_result = false;
+    // 遍历对话历史
     for message in &context.messages {
+        // 模式匹配三种消息之一
         match message {
-            ConversationMessage::User(user) => messages.push(convert_user(user)),
+            ConversationMessage::User(user) => {
+                // 部分 Provider 不允许用户消息直接跟在工具结果后面，插一条 assistant 过渡。
+                if compat.requires_assistant_after_tool_result && previous_was_tool_result {
+                    messages.push(ChatMessage::Assistant {
+                        content: Some("I have processed the tool results.".to_owned()),
+                        tool_calls: None,
+                    });
+                }
+                messages.push(convert_user(user));
+                previous_was_tool_result = false;
+            }
+            //  模型说的话（文本、思考、工具调用，外加用量、停止原因、模型名）
             ConversationMessage::Assistant(assistant) => {
                 // 既无 content 又无 tool_calls 的助手消息会被部分服务端拒绝，跳过。
                 if let Some(message) = convert_assistant(assistant) {
                     messages.push(message);
                 }
+                previous_was_tool_result = false;
             }
-            ConversationMessage::ToolResult(result) => messages.push(convert_tool_result(result)),
+            ConversationMessage::ToolResult(result) => {
+                messages.push(convert_tool_result(result, &compat));
+                previous_was_tool_result = true;
+            }
         }
     }
     messages
@@ -214,6 +272,7 @@ pub fn convert_messages(context: &Context) -> Vec<ChatMessage> {
 fn convert_user(message: &UserMessage) -> ChatMessage {
     let content = match &message.content {
         UserMessageContent::Text(text) => ChatUserContent::Text(text.clone()),
+       // 内容块数组
         UserMessageContent::Blocks(blocks) => ChatUserContent::Parts(
             blocks
                 .iter()
@@ -221,6 +280,7 @@ fn convert_user(message: &UserMessage) -> ChatMessage {
                     UserContent::Text(text) => ChatUserPart::Text {
                         text: text.text.clone(),
                     },
+                    // 图片
                     UserContent::Image(image) => ChatUserPart::ImageUrl {
                         image_url: ChatImageUrl {
                             url: format!("data:{};base64,{}", image.mime_type, image.data),
@@ -266,7 +326,10 @@ fn convert_assistant(message: &AssistantMessage) -> Option<ChatMessage> {
 }
 
 /// 工具结果消息：文本块用换行拼接；只有图片时给服务端一个占位文本。
-fn convert_tool_result(message: &ToolResultMessage) -> ChatMessage {
+fn convert_tool_result(
+    message: &ToolResultMessage,
+    compat: &ResolvedOpenAICompletionsCompat,
+) -> ChatMessage {
     let text = message
         .content
         .iter()
@@ -283,6 +346,9 @@ fn convert_tool_result(message: &ToolResultMessage) -> ChatMessage {
         } else {
             text
         },
+        name: compat
+            .requires_tool_result_name
+            .then(|| message.tool_name.clone()),
     }
 }
 

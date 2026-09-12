@@ -138,7 +138,7 @@ OpenAICompletionsCompat 就是一张**「能力/怪癖清单」**：
 
 
 */
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenAICompletionsCompat {
     // 这家认不认请求体里的 store 字段

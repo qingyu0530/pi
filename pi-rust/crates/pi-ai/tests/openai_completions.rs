@@ -6,10 +6,11 @@ use pi_ai::api::openai_completions::{
 };
 use pi_ai::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, AssistantRole, Context,
-    ConversationMessage, ImageContent, InputType, Model, ModelCost, ModelCostRates, ModelCostTier,
-    Provider, StopReason, TextContent, Tool, ToolCall, ToolResultContent, ToolResultMessage,
-    ToolResultRole, Usage, UsageCost, UserContent, UserMessage, UserMessageContent, UserRole,
-    calculate_cost,
+    ConversationMessage, ImageContent, InputType, MaxTokensField, Model, ModelCompat, ModelCost,
+    ModelCostRates, ModelCostTier, OpenAICompletionsCompat, Provider, StopReason, TextContent,
+    Tool, ToolCall, ToolResultContent, ToolResultMessage, ToolResultRole, Usage, UsageCost,
+    UserContent, UserMessage, UserMessageContent, UserRole, calculate_cost,
+    detect_openai_completions_compat,
 };
 use serde_json::json;
 use std::cell::RefCell;
@@ -110,7 +111,10 @@ fn request_has_model_stream_and_usage_option() {
 
 #[test]
 fn system_and_user_text_messages_match_openai_shape() {
-    let messages = convert_messages(&context(Some("你是助手"), vec![user_text("你好").into()]));
+    let messages = convert_messages(
+        &model(),
+        &context(Some("你是助手"), vec![user_text("你好").into()]),
+    );
 
     assert_eq!(
         serde_json::to_value(messages).unwrap(),
@@ -138,7 +142,7 @@ fn user_blocks_become_text_and_image_parts() {
         timestamp: 1,
     };
 
-    let messages = convert_messages(&context(None, vec![message.into()]));
+    let messages = convert_messages(&model(), &context(None, vec![message.into()]));
 
     assert_eq!(
         serde_json::to_value(messages).unwrap(),
@@ -169,7 +173,7 @@ fn assistant_tool_call_arguments_are_a_json_string() {
         }),
     ]);
 
-    let messages = convert_messages(&context(None, vec![message.into()]));
+    let messages = convert_messages(&model(), &context(None, vec![message.into()]));
 
     assert_eq!(
         serde_json::to_value(messages).unwrap(),
@@ -192,7 +196,7 @@ fn empty_assistant_message_is_skipped() {
         ConversationMessage::from(user_text("hi")),
     ];
 
-    let converted = convert_messages(&context(None, messages));
+    let converted = convert_messages(&model(), &context(None, messages));
 
     assert_eq!(converted.len(), 1);
     assert!(matches!(converted[0], ChatMessage::User { .. }));
@@ -215,7 +219,7 @@ fn tool_result_becomes_tool_message() {
         timestamp: 3,
     };
 
-    let messages = convert_messages(&context(None, vec![result.into()]));
+    let messages = convert_messages(&model(), &context(None, vec![result.into()]));
 
     assert_eq!(
         serde_json::to_value(messages).unwrap(),
@@ -676,4 +680,130 @@ fn provider_emits_error_event_on_transport_failure() {
         }
         other => panic!("expected error event, got {other:?}"),
     }
+}
+
+fn tool_result(tool_name: &str) -> ToolResultMessage {
+    ToolResultMessage {
+        role: ToolResultRole::ToolResult,
+        tool_call_id: "call_1".to_owned(),
+        tool_name: tool_name.to_owned(),
+        content: vec![ToolResultContent::Text(TextContent {
+            text: "结果".to_owned(),
+            text_signature: None,
+        })],
+        details: None,
+        usage: None,
+        added_tool_names: None,
+        is_error: false,
+        timestamp: 1,
+    }
+}
+
+fn with_compat(model: &mut Model, compat: OpenAICompletionsCompat) {
+    model.compat = Some(ModelCompat::OpenaiCompletions(Box::new(compat)));
+}
+
+#[test]
+fn standard_provider_uses_max_completion_tokens_and_store() {
+    let request = build_request(&model(), &context(None, vec![user_text("hi").into()]));
+    let value = serde_json::to_value(request).unwrap();
+
+    assert!(value.get("max_completion_tokens").is_some());
+    assert!(value.get("max_tokens").is_none());
+    // 标准 OpenAI 支持 store，发送 store: false。
+    assert_eq!(value["store"], false);
+}
+
+#[test]
+fn deepseek_provider_uses_max_tokens_and_omits_store() {
+    let mut deepseek = model();
+    deepseek.provider = "deepseek".to_owned();
+    deepseek.base_url = "https://api.deepseek.com/v1".to_owned();
+
+    let request = build_request(&deepseek, &context(None, vec![user_text("hi").into()]));
+    let value = serde_json::to_value(request).unwrap();
+
+    // DeepSeek 被探测为非标准：用 max_tokens，且不发 store。
+    assert!(value.get("max_tokens").is_some());
+    assert!(value.get("max_completion_tokens").is_none());
+    assert!(value.get("store").is_none());
+}
+
+#[test]
+fn developer_role_used_for_reasoning_model() {
+    let mut reasoning = model();
+    reasoning.reasoning = true;
+
+    let messages = convert_messages(&reasoning, &context(Some("你是助手"), Vec::new()));
+    let value = serde_json::to_value(messages).unwrap();
+    assert_eq!(value[0]["role"], "developer");
+
+    // 非推理模型仍用 system。
+    let messages = convert_messages(&model(), &context(Some("你是助手"), Vec::new()));
+    let value = serde_json::to_value(messages).unwrap();
+    assert_eq!(value[0]["role"], "system");
+}
+
+#[test]
+fn tool_result_name_added_when_required() {
+    let mut required = model();
+    with_compat(
+        &mut required,
+        OpenAICompletionsCompat {
+            requires_tool_result_name: Some(true),
+            ..OpenAICompletionsCompat::default()
+        },
+    );
+
+    let messages = convert_messages(&required, &context(None, vec![tool_result("read").into()]));
+    let value = serde_json::to_value(messages).unwrap();
+
+    assert_eq!(value[0]["role"], "tool");
+    assert_eq!(value[0]["name"], "read");
+}
+
+#[test]
+fn assistant_message_inserted_after_tool_result_when_required() {
+    let mut required = model();
+    with_compat(
+        &mut required,
+        OpenAICompletionsCompat {
+            requires_assistant_after_tool_result: Some(true),
+            ..OpenAICompletionsCompat::default()
+        },
+    );
+
+    let messages = convert_messages(
+        &required,
+        &context(
+            None,
+            vec![tool_result("read").into(), user_text("继续").into()],
+        ),
+    );
+    let value = serde_json::to_value(messages).unwrap();
+
+    assert_eq!(value[0]["role"], "tool");
+    assert_eq!(value[1]["role"], "assistant");
+    assert_eq!(value[2]["role"], "user");
+}
+
+#[test]
+fn detect_compat_recognizes_known_providers() {
+    let mut openrouter = model();
+    openrouter.provider = "openrouter".to_owned();
+    openrouter.base_url = "https://openrouter.ai/api/v1".to_owned();
+    let compat = detect_openai_completions_compat(&openrouter);
+    assert_eq!(compat.thinking_format, pi_ai::ThinkingFormat::Openrouter);
+    assert_eq!(
+        compat.session_affinity_format,
+        pi_ai::SessionAffinityFormat::Openrouter
+    );
+    assert_eq!(compat.max_tokens_field, MaxTokensField::MaxCompletionTokens);
+
+    let mut nvidia = model();
+    nvidia.provider = "nvidia".to_owned();
+    nvidia.base_url = "https://integrate.api.nvidia.com/v1".to_owned();
+    let compat = detect_openai_completions_compat(&nvidia);
+    assert!(!compat.supports_store);
+    assert_eq!(compat.max_tokens_field, MaxTokensField::MaxTokens);
 }

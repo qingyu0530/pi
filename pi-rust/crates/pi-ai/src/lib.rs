@@ -52,4 +52,8 @@ pub use provider::{FauxProvider, FauxResponse, Provider};
 // API 协议层与真实传输
 pub use api::http::{HttpError, HttpRequest, HttpTransport};
 pub use api::http_ureq::UreqTransport;
+pub use api::openai_compat::{
+    ResolvedOpenAICompletionsCompat, detect_openai_completions_compat,
+    resolve_openai_completions_compat,
+};
 pub use api::openai_completions::{OpenAiCompletionsProvider, aggregate_sse};

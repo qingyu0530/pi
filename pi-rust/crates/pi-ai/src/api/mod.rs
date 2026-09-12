@@ -6,4 +6,5 @@
 
 pub mod http;
 pub mod http_ureq;
+pub mod openai_compat;
 pub mod openai_completions;
