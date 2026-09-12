@@ -7,10 +7,10 @@ use pi_ai::api::openai_completions::{
 use pi_ai::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, AssistantRole, Context,
     ConversationMessage, ImageContent, InputType, MaxTokensField, Model, ModelCompat, ModelCost,
-    ModelCostRates, ModelCostTier, OpenAICompletionsCompat, Provider, StopReason, TextContent,
-    Tool, ToolCall, ToolResultContent, ToolResultMessage, ToolResultRole, Usage, UsageCost,
-    UserContent, UserMessage, UserMessageContent, UserRole, calculate_cost,
-    detect_openai_completions_compat,
+    ModelCostRates, ModelCostTier, OpenAICompletionsCompat, OpenRouterRouting, Provider,
+    StopReason, TextContent, Tool, ToolCall, ToolResultContent, ToolResultMessage, ToolResultRole,
+    Usage, UsageCost, UserContent, UserMessage, UserMessageContent, UserRole, VercelGatewayRouting,
+    calculate_cost, detect_openai_completions_compat,
 };
 use serde_json::json;
 use std::cell::RefCell;
@@ -258,7 +258,9 @@ fn tools_are_serialized_as_function_tools() {
                     "type": "object",
                     "properties": { "path": { "type": "string" } },
                     "required": ["path"]
-                }
+                },
+                // 标准 OpenAI 支持 strict 模式，带上 strict: false。
+                "strict": false
             }
         }])
     );
@@ -806,4 +808,66 @@ fn detect_compat_recognizes_known_providers() {
     let compat = detect_openai_completions_compat(&nvidia);
     assert!(!compat.supports_store);
     assert_eq!(compat.max_tokens_field, MaxTokensField::MaxTokens);
+}
+
+#[test]
+fn openrouter_routing_serialized_into_provider_field() {
+    let mut routed = model();
+    routed.provider = "openrouter".to_owned();
+    routed.base_url = "https://openrouter.ai/api/v1".to_owned();
+    with_compat(
+        &mut routed,
+        OpenAICompletionsCompat {
+            open_router_routing: Some(OpenRouterRouting {
+                only: Some(vec!["anthropic".to_owned()]),
+                ..OpenRouterRouting::default()
+            }),
+            ..OpenAICompletionsCompat::default()
+        },
+    );
+
+    let request = build_request(&routed, &context(None, vec![user_text("hi").into()]));
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(value["provider"]["only"], json!(["anthropic"]));
+}
+
+#[test]
+fn vercel_gateway_routing_wrapped_in_provider_options() {
+    let mut routed = model();
+    with_compat(
+        &mut routed,
+        OpenAICompletionsCompat {
+            vercel_gateway_routing: Some(VercelGatewayRouting {
+                order: Some(vec!["anthropic".to_owned()]),
+                ..VercelGatewayRouting::default()
+            }),
+            ..OpenAICompletionsCompat::default()
+        },
+    );
+
+    let request = build_request(&routed, &context(None, vec![user_text("hi").into()]));
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(
+        value["providerOptions"]["gateway"]["order"],
+        json!(["anthropic"])
+    );
+}
+
+#[test]
+fn assistant_reasoning_content_added_for_deepseek() {
+    let mut deepseek = model();
+    deepseek.provider = "deepseek".to_owned();
+    deepseek.base_url = "https://api.deepseek.com/v1".to_owned();
+
+    let message = assistant(vec![AssistantContent::Text(TextContent {
+        text: "回答".to_owned(),
+        text_signature: None,
+    })]);
+    let messages = convert_messages(&deepseek, &context(None, vec![message.into()]));
+    let value = serde_json::to_value(messages).unwrap();
+
+    assert_eq!(value[0]["role"], "assistant");
+    assert_eq!(value[0]["reasoning_content"], "");
 }

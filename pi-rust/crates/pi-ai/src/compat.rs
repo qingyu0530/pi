@@ -327,7 +327,7 @@ pub struct BedrockCompat {
 /// OpenRouter 供应商路由偏好。
 /// 原版：export interface OpenRouterRouting
 /// 这些字段名保持 OpenRouter API 要求的下划线命名，所以这里没有 rename_all。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct OpenRouterRouting {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_fallbacks: Option<bool>,
@@ -459,7 +459,7 @@ pub struct Percentiles {
 
 /// Vercel AI Gateway 路由偏好。
 /// 原版：export interface VercelGatewayRouting
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct VercelGatewayRouting {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub only: Option<Vec<String>>,

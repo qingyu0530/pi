@@ -16,7 +16,7 @@ use crate::api::http::{HttpError, HttpRequest, HttpTransport};
 use crate::api::openai_compat::{
     ResolvedOpenAICompletionsCompat, resolve_openai_completions_compat,
 };
-use crate::compat::MaxTokensField;
+use crate::compat::{MaxTokensField, OpenRouterRouting, VercelGatewayRouting};
 use crate::content::{
     AssistantContent, TextContent, ThinkingContent, ToolCall, ToolResultContent, UserContent,
 };
@@ -53,6 +53,12 @@ pub struct ChatRequest {
     /// 是否让服务端存储本次请求（`false` 表示不存）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub store: Option<bool>,
+    /// OpenRouter 供应商路由偏好。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<OpenRouterRouting>,
+    /// Vercel AI Gateway 路由偏好。
+    #[serde(rename = "providerOptions", skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<VercelProviderOptions>,
     /// 采样温度，越大输出越随机。
     /// 控制模型输出有多随机
     /// 模型每一步不是直接输出一个词，而是先算出所有候选词的概率分布。温度 T 在归一化成概率之前缩放这些分数（logits）
@@ -69,6 +75,12 @@ pub struct StreamOptions {
     /// 让服务端在流末尾发送一个包含 token 用量的 chunk。
     /// 不加这个字段时，流式响应通常不会返回 usage。
     pub include_usage: bool,
+}
+
+/// Vercel AI Gateway 的 `providerOptions`：把路由偏好包在 `gateway` 下。
+#[derive(Clone, Debug, Serialize)]
+pub struct VercelProviderOptions {
+    pub gateway: VercelGatewayRouting,
 }
 
 /// 一条 OpenAI chat 消息，用 `role` 字段区分四种形状。
@@ -97,6 +109,10 @@ pub enum ChatMessage {
         content: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         tool_calls: Option<Vec<ChatToolCall>>,
+        /// 部分 Provider（DeepSeek）重放 assistant 消息时必须带该字段（可为空串）。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        // 重放历史时用的字段。
+        reasoning_content: Option<String>,
     },
 
     /// 工具执行结果，用 `tool_call_id` 指回它回应的是哪次调用。
@@ -182,6 +198,8 @@ pub struct ChatFunctionDef {
 }
 
 /// 把 pi 的模型和上下文翻译成 OpenAI 请求体。
+/// 把 pi 的 Model + Context（内存对象）翻译成一份可以直接 POST /chat/completions 的 JSON 请求体
+/// 
 #[must_use]
 pub fn build_request(model: &Model, context: &Context) -> ChatRequest {
     // 解析一次，后面复用
@@ -191,6 +209,14 @@ pub fn build_request(model: &Model, context: &Context) -> ChatRequest {
         MaxTokensField::MaxTokens => (None, Some(model.max_tokens)),
         MaxTokensField::MaxCompletionTokens => (Some(model.max_tokens), None),
     };
+    // Vercel 只有在设了 only/order 时才发 providerOptions。
+    // 这个模型有没有 Vercel 路由配置，而且里面真的写了规则
+    // 有就构造出一个 providerOptions，没有就是 None。
+    let provider_options = compat.vercel_gateway_routing.as_ref().and_then(|routing| {
+        (routing.only.is_some() || routing.order.is_some()).then(|| VercelProviderOptions {
+            gateway: routing.clone(),
+        })
+    });
     ChatRequest {
         model: model.id.clone(),
         messages: convert_messages(model, context),
@@ -201,11 +227,17 @@ pub fn build_request(model: &Model, context: &Context) -> ChatRequest {
         max_completion_tokens,
         max_tokens,
         store: compat.supports_store.then_some(false),
+        // 把上一步算好的 Vercel 路由，和 OpenRouter 的路由，分别放进请求体的两个字段。
+        provider: compat.open_router_routing.clone(),
+        provider_options,
         temperature: None,
-        tools: context
-            .tools
-            .as_ref()
-            .map(|tools| tools.iter().map(convert_tool).collect()),
+        // 把 Context 里的工具列表逐条翻译成 OpenAI 的工具定义；每条都要把 compat 传进去，因为「要不要带 strict」取决于 compat
+        tools: context.tools.as_ref().map(|tools| {
+            tools
+                .iter()
+                .map(|tool| convert_tool(tool, &compat))
+                .collect()
+        }),
     }
 }
 
@@ -246,6 +278,7 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<ChatMessage> {
                     messages.push(ChatMessage::Assistant {
                         content: Some("I have processed the tool results.".to_owned()),
                         tool_calls: None,
+                        reasoning_content: None,
                     });
                 }
                 messages.push(convert_user(user));
@@ -254,7 +287,7 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<ChatMessage> {
             //  模型说的话（文本、思考、工具调用，外加用量、停止原因、模型名）
             ConversationMessage::Assistant(assistant) => {
                 // 既无 content 又无 tool_calls 的助手消息会被部分服务端拒绝，跳过。
-                if let Some(message) = convert_assistant(assistant) {
+                if let Some(message) = convert_assistant(assistant, &compat) {
                     messages.push(message);
                 }
                 previous_was_tool_result = false;
@@ -272,7 +305,7 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<ChatMessage> {
 fn convert_user(message: &UserMessage) -> ChatMessage {
     let content = match &message.content {
         UserMessageContent::Text(text) => ChatUserContent::Text(text.clone()),
-       // 内容块数组
+        // 内容块数组
         UserMessageContent::Blocks(blocks) => ChatUserContent::Parts(
             blocks
                 .iter()
@@ -297,7 +330,11 @@ fn convert_user(message: &UserMessage) -> ChatMessage {
 ///
 /// 对话历史里通常有文本，而标准 Chat Completions 的 `content` 是字符串，
 /// 所以多个文本块直接拼接。thinking 块不回传（标准协议不接收）。
-fn convert_assistant(message: &AssistantMessage) -> Option<ChatMessage> {
+fn convert_assistant(
+    // 让这个函数能读到「这家 Provider 重放助手消息时要不要带 reasoning_content
+    message: &AssistantMessage,
+    compat: &ResolvedOpenAICompletionsCompat,
+) -> Option<ChatMessage> {
     let mut text = String::new();
     let mut tool_calls = Vec::new();
     for block in &message.content {
@@ -319,9 +356,14 @@ fn convert_assistant(message: &AssistantMessage) -> Option<ChatMessage> {
     if text.is_empty() && tool_calls.is_empty() {
         return None;
     }
+    // 返回这条 assistant 消息；对 DeepSeek 这类厂商额外塞一个空的 reasoning_content。
     Some(ChatMessage::Assistant {
         content: (!text.is_empty()).then_some(text),
         tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
+        // DeepSeek 等要求重放的 assistant 消息带 reasoning_content（可为空串）。
+        reasoning_content: compat
+            .requires_reasoning_content_on_assistant_messages
+            .then(String::new),
     })
 }
 
@@ -353,13 +395,14 @@ fn convert_tool_result(
 }
 
 /// 把 pi 的工具定义翻译成 OpenAI 的 function 工具。
-fn convert_tool(tool: &Tool) -> ChatTool {
+fn convert_tool(tool: &Tool, compat: &ResolvedOpenAICompletionsCompat) -> ChatTool {
     ChatTool::Function {
         function: ChatFunctionDef {
             name: tool.name.clone(),
             description: tool.description.clone(),
             parameters: tool.parameters.clone(),
-            strict: None,
+            // 支持 strict 的 Provider 带上 strict: false（表示不强制）。
+            strict: compat.supports_strict_mode.then_some(false),
         },
     }
 }

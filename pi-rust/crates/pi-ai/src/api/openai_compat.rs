@@ -7,8 +7,8 @@
 //!
 //! 对应原版 openai-completions.ts 的 `detectCompat` / `getCompat`。
 
-// 可以理解为 是在处理模型的怪癖  
-// 
+// 可以理解为 是在处理模型的怪癖
+//
 use std::collections::HashMap;
 
 use crate::compat::{
