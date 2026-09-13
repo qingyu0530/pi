@@ -6,8 +6,8 @@ use pi_agent_core::{
 };
 use pi_ai::{
     AssistantMessageEvent, FauxProvider, FauxResponse, InputType, Model, ModelCost, ModelCostRates,
-    OpenAiCompletionsProvider, StopReason, UreqTransport, UserMessage, UserMessageContent,
-    UserRole,
+    OpenAiCompletionsProvider, RequestOptions, StopReason, UreqTransport, UserMessage,
+    UserMessageContent, UserRole,
 };
 use pi_tui::{PlainRenderer, Renderer};
 
@@ -98,8 +98,14 @@ impl Cli {
         let env = RealEnvironment;
         // 文件不存在时从空会话开始。
         let session = Session::load(&env, &session_path).unwrap_or_default();
+        // 创建 Agent 后，把会话文件路径作为 session id 设进请求选项
         // 建 Agent、注册工具。
-        let (mut agent, model_label) = build_agent();
+        let (agent, model_label) = build_agent();
+        // 用会话文件路径作为 session id，供会话亲和请求头使用。
+        let mut agent = agent.with_options(RequestOptions {
+            session_id: Some(session_path.clone()),
+            ..RequestOptions::default()
+        });
         register_tools(&mut agent);
         // 把已保存的历史消息回放进 Agent。
         for message in session.messages() {

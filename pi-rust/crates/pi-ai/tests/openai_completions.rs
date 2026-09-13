@@ -120,6 +120,7 @@ fn request_uses_options_temperature_and_max_tokens() {
         temperature: Some(0.7),
         max_tokens: Some(42),
         reasoning_effort: None,
+        session_id: None,
     };
     let request = build_request(
         &model(),
@@ -1018,4 +1019,80 @@ fn openrouter_effort_uses_reasoning_object() {
     let value = serde_json::to_value(request).unwrap();
 
     assert_eq!(value["reasoning"]["effort"], "low");
+}
+
+#[test]
+fn session_affinity_headers_use_openai_format() {
+    let transport = FakeTransport::new("data: [DONE]\n\n");
+    let provider = OpenAiCompletionsProvider::new(Box::new(transport.clone()), "test-key");
+    let mut compatible = model();
+    with_compat(
+        &mut compatible,
+        OpenAICompletionsCompat {
+            send_session_affinity_headers: Some(true),
+            ..OpenAICompletionsCompat::default()
+        },
+    );
+    let options = RequestOptions {
+        session_id: Some("sess-1".to_owned()),
+        ..RequestOptions::default()
+    };
+    let context = Context {
+        system_prompt: None,
+        messages: vec![user_text("hi").into()],
+        tools: None,
+    };
+
+    let _: Vec<AssistantMessageEvent> = provider.stream(&compatible, &context, &options).collect();
+
+    let request = transport.request().expect("request sent");
+    let header = |name: &str| {
+        request
+            .headers
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    };
+    assert_eq!(header("session_id"), Some("sess-1"));
+    assert_eq!(header("x-client-request-id"), Some("sess-1"));
+    assert_eq!(header("x-session-affinity"), Some("sess-1"));
+}
+
+#[test]
+fn session_affinity_headers_use_openrouter_format() {
+    let transport = FakeTransport::new("data: [DONE]\n\n");
+    let provider = OpenAiCompletionsProvider::new(Box::new(transport.clone()), "test-key");
+    let mut openrouter = model();
+    openrouter.provider = "openrouter".to_owned();
+    openrouter.base_url = "https://openrouter.ai/api/v1".to_owned();
+    with_compat(
+        &mut openrouter,
+        OpenAICompletionsCompat {
+            send_session_affinity_headers: Some(true),
+            ..OpenAICompletionsCompat::default()
+        },
+    );
+    let options = RequestOptions {
+        session_id: Some("sess-2".to_owned()),
+        ..RequestOptions::default()
+    };
+    let context = Context {
+        system_prompt: None,
+        messages: vec![user_text("hi").into()],
+        tools: None,
+    };
+
+    let _: Vec<AssistantMessageEvent> = provider.stream(&openrouter, &context, &options).collect();
+
+    let request = transport.request().expect("request sent");
+    let header = |name: &str| {
+        request
+            .headers
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    };
+    // OpenRouter 只用 x-session-id。
+    assert_eq!(header("x-session-id"), Some("sess-2"));
+    assert_eq!(header("session_id"), None);
 }

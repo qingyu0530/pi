@@ -35,6 +35,9 @@ pub struct RequestOptions {
     pub max_tokens: Option<u64>,
     /// 推理/思考级别；`None` 表示不特别指定（交给服务端或模型默认）。
     pub reasoning_effort: Option<ModelThinkingLevel>,
+    /// 会话 id；用于会话亲和请求头，让同一会话的请求粘到同一后端副本。
+    /// 用会话 id 把请求“粘”到同一台副本，让提示缓存持续命中，省时省钱
+    pub session_id: Option<String>,
 }
 
 /// 运行时单元：持有模型目录，并把一次请求转换成流式事件。

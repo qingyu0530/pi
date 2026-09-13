@@ -16,7 +16,9 @@ use crate::api::http::{HttpError, HttpRequest, HttpTransport};
 use crate::api::openai_compat::{
     ResolvedOpenAICompletionsCompat, resolve_openai_completions_compat,
 };
-use crate::compat::{MaxTokensField, OpenRouterRouting, ThinkingFormat, VercelGatewayRouting};
+use crate::compat::{
+    MaxTokensField, OpenRouterRouting, SessionAffinityFormat, ThinkingFormat, VercelGatewayRouting,
+};
 use crate::content::{
     AssistantContent, TextContent, ThinkingContent, ToolCall, ToolResultContent, UserContent,
 };
@@ -1228,6 +1230,7 @@ impl OpenAiCompletionsProvider {
     // 调用你之前写好的请求体转换，得到 ChatRequest。
     /// 构造发给 `/chat/completions` 的 HTTP 请求。
     /// 把请求体序列化成 JSON 字符串。改动就是把 options 继续往下传给 build_request。这是一层中转
+    /// 把一次调用变成真正的 HTTP 请求（URL + 请求头 + 请求体）
     fn build_http_request(
         &self,
         model: &Model,
@@ -1237,17 +1240,39 @@ impl OpenAiCompletionsProvider {
         let body = serde_json::to_string(&build_request(model, context, options))
             .map_err(|error| HttpError::new(format!("序列化请求失败: {error}")))?;
         let url = format!("{}/chat/completions", model.base_url.trim_end_matches('/'));
-        Ok(HttpRequest {
-            url,
-            headers: vec![
-                ("Content-Type".to_owned(), "application/json".to_owned()),
-                (
-                    "Authorization".to_owned(),
-                    format!("Bearer {}", self.api_key),
-                ),
-            ],
-            body,
-        })
+        // 请求头列表，先放两个固定头
+        let mut headers = vec![
+            ("Content-Type".to_owned(), "application/json".to_owned()),
+            (
+                "Authorization".to_owned(),
+                format!("Bearer {}", self.api_key),
+            ),
+        ];
+
+        // 会话亲和：Provider 支持且有 session id 时，按格式加上请求头，
+        // 让同一会话的请求路由到同一后端副本（提升提示缓存命中率）。
+        if let Some(session_id) = &options.session_id {
+            // 解析这家的兼容设置，且必须显式开启「发送会话亲和头」才继续
+            let compat = resolve_openai_completions_compat(model);
+            if compat.send_session_affinity_headers {
+                match compat.session_affinity_format {
+                    SessionAffinityFormat::Openrouter => {
+                        headers.push(("x-session-id".to_owned(), session_id.clone()));
+                    }
+                    SessionAffinityFormat::Openai => {
+                        headers.push(("session_id".to_owned(), session_id.clone()));
+                        headers.push(("x-client-request-id".to_owned(), session_id.clone()));
+                        headers.push(("x-session-affinity".to_owned(), session_id.clone()));
+                    }
+                    SessionAffinityFormat::OpenaiNosession => {
+                        headers.push(("x-client-request-id".to_owned(), session_id.clone()));
+                        headers.push(("x-session-affinity".to_owned(), session_id.clone()));
+                    }
+                }
+            }
+        }
+
+        Ok(HttpRequest { url, headers, body })
     }
 
     /// 发请求并把 SSE 响应体聚合成事件；失败时返回单个 error 事件。
