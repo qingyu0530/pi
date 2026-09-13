@@ -18,6 +18,8 @@ mod cost;
 mod compat;
 // 模型目录
 mod model;
+// 模型注册表（从数据加载）
+mod models;
 // Provider 抽象
 mod provider;
 
@@ -47,6 +49,7 @@ pub use model::{
     ImagesModel, InputType, Model, ModelCompat, ModelThinkingLevel, ThinkingLevel,
     ThinkingLevelMap, calculate_cost,
 };
+pub use models::{ModelRegistry, RegistryError};
 pub use provider::{CacheRetention, FauxProvider, FauxResponse, Provider, RequestOptions};
 
 // API 协议层与真实传输

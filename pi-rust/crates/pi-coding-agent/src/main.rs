@@ -6,25 +6,25 @@ use pi_agent_core::{
 };
 use pi_ai::{
     AssistantMessageEvent, FauxProvider, FauxResponse, InputType, Model, ModelCost, ModelCostRates,
-    OpenAiCompletionsProvider, RequestOptions, StopReason, UreqTransport, UserMessage,
-    UserMessageContent, UserRole,
+    ModelRegistry, OpenAiCompletionsProvider, RequestOptions, StopReason, UreqTransport,
+    UserMessage, UserMessageContent, UserRole,
 };
 use pi_tui::{PlainRenderer, Renderer};
 
 /// 默认的会话文件（可用 `PI_SESSION` 环境变量覆盖）。
 const DEFAULT_SESSION_FILE: &str = "pi-session.jsonl";
 
-/// 构造一个 OpenAI-compatible 模型描述。
-fn openai_model(base_url: &str, model_id: &str) -> Model {
+/// 演示用的极简模型（没有真实 API Key 时走 Faux）。
+fn demo_model() -> Model {
     Model {
-        id: model_id.to_owned(),
-        name: model_id.to_owned(),
+        id: "faux-1".to_owned(),
+        name: "Faux 1".to_owned(),
         api: "openai-completions".to_owned(),
-        provider: "openai".to_owned(),
-        base_url: base_url.to_owned(),
+        provider: "faux".to_owned(),
+        base_url: "https://api.openai.com/v1".to_owned(),
         reasoning: false,
         thinking_level_map: None,
-        input: vec![InputType::Text, InputType::Image],
+        input: vec![InputType::Text],
         cost: ModelCost {
             rates: ModelCostRates {
                 input: 0.0,
@@ -42,6 +42,27 @@ fn openai_model(base_url: &str, model_id: &str) -> Model {
     }
 }
 
+/// 构造 Faux 演示 Agent；`scripted` 为真时先调用 read 再回文本。
+fn faux_agent(scripted: bool) -> (Agent, String) {
+    let model = demo_model();
+    let provider = if scripted {
+        let arguments = serde_json::json!({ "path": "Cargo.toml" })
+            .as_object()
+            .unwrap()
+            .clone();
+        FauxProvider::with_script(
+            vec![model.clone()],
+            vec![
+                FauxResponse::tool_call("call_1", "read", arguments),
+                FauxResponse::Text("完成".to_owned()),
+            ],
+        )
+    } else {
+        FauxProvider::new(vec![model.clone()])
+    };
+    (Agent::new(Box::new(provider), model), "faux-1".to_owned())
+}
+
 /// 给 Agent 注册内置工具。
 fn register_tools(agent: &mut Agent) {
     agent.add_tool(Box::new(ReadTool::new(Box::new(RealEnvironment))));
@@ -49,35 +70,37 @@ fn register_tools(agent: &mut Agent) {
     agent.add_tool(Box::new(EditTool::new(Box::new(RealEnvironment))));
 }
 
-/// 根据环境变量创建 Agent：有 API Key 走真实 Provider，否则回退 Faux 演示。
+/// 根据环境变量与内置模型目录创建 Agent。
+///
+/// - `PI_PROVIDER` / `PI_MODEL` 选择模型（默认 openai/gpt-4o-mini）。
+/// - 有 `OPENAI_API_KEY` 且模型存在时走真实 Provider，否则回退 Faux 演示。
+/// 决定用真实 Provider 还是 Faux，并选出模型。
 fn build_agent() -> (Agent, String) {
-    match std::env::var("OPENAI_API_KEY") {
-        Ok(api_key) => {
-            let base_url = std::env::var("OPENAI_BASE_URL")
-                .unwrap_or_else(|_| "https://api.openai.com/v1".to_owned());
-            let model_id =
-                std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_owned());
-            let model = openai_model(&base_url, &model_id);
-            let provider = OpenAiCompletionsProvider::new(Box::new(UreqTransport::new()), api_key);
-            (Agent::new(Box::new(provider), model), model_id)
-        }
-        Err(_) => {
-            eprintln!("未设置 OPENAI_API_KEY，使用 FauxProvider 演示。");
-            let model = openai_model("https://api.openai.com/v1", "faux-1");
-            let arguments = serde_json::json!({ "path": "Cargo.toml" })
-                .as_object()
-                .unwrap()
-                .clone();
-            let provider = FauxProvider::with_script(
-                vec![model.clone()],
-                vec![
-                    FauxResponse::tool_call("call_1", "read", arguments),
-                    FauxResponse::Text("完成".to_owned()),
-                ],
-            );
-            (Agent::new(Box::new(provider), model), "faux-1".to_owned())
-        }
+    let registry = ModelRegistry::builtin();
+    let provider_name = std::env::var("PI_PROVIDER").unwrap_or_else(|_| "openai".to_owned());
+    let model_id = std::env::var("PI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_owned());
+
+    let Some(api_key) = std::env::var("OPENAI_API_KEY").ok() else {
+        eprintln!("未设置 OPENAI_API_KEY，使用 FauxProvider 演示。");
+        return faux_agent(true);
+    };
+
+    let Some(model) = registry.get(&provider_name, &model_id).cloned() else {
+        eprintln!("模型目录中没有 {provider_name}/{model_id}，使用 FauxProvider 演示。");
+        eprintln!("可用 provider: {}", registry.providers().join(", "));
+        return faux_agent(false);
+    };
+
+    if model.api != "openai-completions" {
+        eprintln!("暂不支持的 api: {}，使用 FauxProvider 演示。", model.api);
+        return faux_agent(false);
     }
+
+    let provider = OpenAiCompletionsProvider::new(Box::new(UreqTransport::new()), api_key);
+    (
+        Agent::new(Box::new(provider), model),
+        format!("{provider_name}/{model_id}"),
+    )
 }
 
 /// CLI 会话：组合 Agent、会话日志、环境与文件路径。
