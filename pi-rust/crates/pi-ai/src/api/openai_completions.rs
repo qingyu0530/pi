@@ -17,7 +17,8 @@ use crate::api::openai_compat::{
     ResolvedOpenAICompletionsCompat, resolve_openai_completions_compat,
 };
 use crate::compat::{
-    MaxTokensField, OpenRouterRouting, SessionAffinityFormat, ThinkingFormat, VercelGatewayRouting,
+    CacheControlFormat, MaxTokensField, OpenRouterRouting, SessionAffinityFormat, ThinkingFormat,
+    VercelGatewayRouting,
 };
 use crate::content::{
     AssistantContent, TextContent, ThinkingContent, ToolCall, ToolResultContent, UserContent,
@@ -29,7 +30,7 @@ use crate::message::{
     UsageCost, UserMessage, UserMessageContent,
 };
 use crate::model::{Model, ModelThinkingLevel, calculate_cost};
-use crate::provider::{Provider, RequestOptions};
+use crate::provider::{CacheRetention, Provider, RequestOptions};
 
 /// `POST /chat/completions` 的请求体。
 ///
@@ -75,6 +76,12 @@ pub struct ChatRequest {
     /// OpenRouter 的推理配置。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ReasoningParam>,
+    /// OpenAI 提示缓存的 key（用 session id，最长 64 字符）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
+    /// OpenAI 提示缓存的保留时长，长缓存时为 "24h"。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_retention: Option<String>,
     /// 本次可用的工具定义。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ChatTool>>,
@@ -119,11 +126,11 @@ pub struct ReasoningParam {
 pub enum ChatMessage {
     /// 系统提示，整个对话最前面一条。
     #[serde(rename = "system")]
-    System { content: String },
+    System { content: ChatTextContent },
 
     /// 系统提示的另一种角色名，部分新模型（推理模型）要求用 `developer`。
     #[serde(rename = "developer")]
-    Developer { content: String },
+    Developer { content: ChatTextContent },
 
     /// 用户输入：纯文本，或文本 + 图片的内容块数组。
     #[serde(rename = "user")]
@@ -133,7 +140,7 @@ pub enum ChatMessage {
     /// 只要它发起过工具调用，就必须用 `tool_calls` 带上。
     #[serde(rename = "assistant")]
     Assistant {
-        content: Option<String>,
+        content: Option<ChatTextContent>,
         #[serde(skip_serializing_if = "Option::is_none")]
         tool_calls: Option<Vec<ChatToolCall>>,
         /// 部分 Provider（DeepSeek）重放 assistant 消息时必须带该字段（可为空串）。
@@ -146,11 +153,67 @@ pub enum ChatMessage {
     #[serde(rename = "tool")]
     Tool {
         tool_call_id: String,
-        content: String,
+        content: ChatTextContent,
         /// 部分 Provider 要求工具结果带工具名。
         #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
+}
+
+/// 提示缓存的标记（Anthropic 风格），打在文本内容块上。
+#[derive(Clone, Debug, Serialize)]
+pub struct CacheControl {
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// 长缓存时为 "1h"。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
+}
+
+/// 系统/助手/工具消息的正文：纯文本，或内容块数组（数组用于挂 `cache_control`）。
+#[derive(Clone, Debug, Serialize)]
+#[serde(untagged)]
+pub enum ChatTextContent {
+    Text(String),
+    Parts(Vec<ChatTextPart>),
+}
+
+/// 文本内容块，可带 `cache_control`。
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "type")]
+pub enum ChatTextPart {
+    #[serde(rename = "text")]
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
+}
+// 给这条正文打标记
+impl ChatTextContent {
+    /// 给最后一个文本块打上 `cache_control`；纯字符串会转成单元素数组。
+    fn set_cache_control(&mut self, cache_control: CacheControl) {
+        match self {
+            Self::Text(text) => {
+                if !text.is_empty() {
+                    let text = std::mem::take(text);
+                    *self = Self::Parts(vec![ChatTextPart::Text {
+                        text,
+                        cache_control: Some(cache_control),
+                    }]);
+                }
+            }
+            Self::Parts(parts) => {
+                if let Some(ChatTextPart::Text {
+                    cache_control: slot,
+                    ..
+                }) = parts.last_mut()
+                {
+                    *slot = Some(cache_control);
+                }
+            }
+        }
+    }
 }
 
 /// user 消息的 `content`：纯文本字符串，或者内容块数组。
@@ -160,13 +223,47 @@ pub enum ChatUserContent {
     Text(String),
     Parts(Vec<ChatUserPart>),
 }
+// 给这条正文打标记  和上面几乎一样，但 user 的内容块可能是文本也可能是图片
+impl ChatUserContent {
+    /// 给最后一个文本块打上 `cache_control`；纯字符串会转成单元素数组。
+    fn set_cache_control(&mut self, cache_control: CacheControl) {
+        match self {
+            Self::Text(text) => {
+                if !text.is_empty() {
+                    let text = std::mem::take(text);
+                    *self = Self::Parts(vec![ChatUserPart::Text {
+                        text,
+                        cache_control: Some(cache_control),
+                    }]);
+                }
+            }
+            Self::Parts(parts) => {
+                for part in parts.iter_mut().rev() {
+                    if let ChatUserPart::Text {
+                        cache_control: slot,
+                        ..
+                    } = part
+                    {
+                        *slot = Some(cache_control);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// user 内容块数组里的一项。
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type")]
+// user 的文本块也能挂 cache_control。图片块不用
 pub enum ChatUserPart {
     #[serde(rename = "text")]
-    Text { text: String },
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
     #[serde(rename = "image_url")]
     ImageUrl { image_url: ChatImageUrl },
 }
@@ -222,6 +319,9 @@ pub struct ChatFunctionDef {
     /// 是否要求模型严格遵守 schema；`None` 时不发送该字段。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strict: Option<bool>,
+    /// 提示缓存标记（打在最后一个工具上）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 /// 把 pi 的模型和上下文翻译成 OpenAI 请求体。
@@ -248,9 +348,38 @@ pub fn build_request(model: &Model, context: &Context, options: &RequestOptions)
     });
     // 按 thinking_format 把 reasoning_effort 变成各厂商要求的思考字段。
     let thinking = resolve_thinking_params(model, &compat, options);
+    // OpenAI 提示缓存：默认 short；none 时不发缓存字段。
+    let cache_retention = options.cache_retention.unwrap_or_default();
+    let cache_session_id = (cache_retention != CacheRetention::None)
+        .then_some(options.session_id.as_deref())
+        .flatten();
+    let prompt_cache_key = if (model.base_url.contains("api.openai.com")
+        && cache_retention != CacheRetention::None)
+        || (cache_retention == CacheRetention::Long && compat.supports_long_cache_retention)
+    {
+        cache_session_id.map(clamp_prompt_cache_key)
+    } else {
+        None
+    };
+    let prompt_cache_retention = (cache_retention == CacheRetention::Long
+        && compat.supports_long_cache_retention)
+        .then(|| "24h".to_owned());
+
+    // 消息与工具先构造成可变，便于按 Anthropic 约定打 cache_control 标记。
+    let mut messages = convert_messages(model, context);
+    let mut tools: Option<Vec<ChatTool>> = context.tools.as_ref().map(|tools| {
+        tools
+            .iter()
+            .map(|tool| convert_tool(tool, &compat))
+            .collect()
+    });
+    if let Some(cache_control) = resolve_cache_control(&compat, cache_retention) {
+        apply_anthropic_cache_control(&mut messages, tools.as_mut(), &cache_control);
+    }
+
     ChatRequest {
         model: model.id.clone(),
-        messages: convert_messages(model, context),
+        messages,
         stream: true,
         stream_options: compat.supports_usage_in_streaming.then_some(StreamOptions {
             include_usage: true,
@@ -265,14 +394,80 @@ pub fn build_request(model: &Model, context: &Context, options: &RequestOptions)
         reasoning_effort: thinking.reasoning_effort,
         thinking: thinking.thinking,
         reasoning: thinking.reasoning,
-        // 把 Context 里的工具列表逐条翻译成 OpenAI 的工具定义；每条都要把 compat 传进去，因为「要不要带 strict」取决于 compat
-        tools: context.tools.as_ref().map(|tools| {
-            tools
-                .iter()
-                .map(|tool| convert_tool(tool, &compat))
-                .collect()
-        }),
+        prompt_cache_key,
+        prompt_cache_retention,
+        tools,
     }
+}
+
+/// 计算 Anthropic 风格的 cache_control 标记。
+///
+/// 只有 `cache_control_format == anthropic` 且没用 `None` 时才启用；
+/// 长缓存且厂商支持时带 `ttl: "1h"`。
+fn resolve_cache_control(
+    compat: &ResolvedOpenAICompletionsCompat,
+    cache_retention: CacheRetention,
+) -> Option<CacheControl> {
+    if compat.cache_control_format != Some(CacheControlFormat::Anthropic)
+        || cache_retention == CacheRetention::None
+    {
+        return None;
+    }
+    let ttl = (cache_retention == CacheRetention::Long && compat.supports_long_cache_retention)
+        .then(|| "1h".to_owned());
+    Some(CacheControl {
+        kind: "ephemeral".to_owned(),
+        ttl,
+    })
+}
+
+/// 按 Anthropic 约定打 cache_control：系统提示、最后一个工具、最后一条对话消息。
+fn apply_anthropic_cache_control(
+    messages: &mut [ChatMessage],
+    tools: Option<&mut Vec<ChatTool>>,
+    cache_control: &CacheControl,
+) {
+    for message in messages.iter_mut() {
+        match message {
+            ChatMessage::System { content } | ChatMessage::Developer { content } => {
+                content.set_cache_control(cache_control.clone());
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(tools) = tools {
+        if let Some(ChatTool::Function { function }) = tools.last_mut() {
+            function.cache_control = Some(cache_control.clone());
+        }
+    }
+
+    for message in messages.iter_mut().rev() {
+        match message {
+            ChatMessage::User { content } => {
+                content.set_cache_control(cache_control.clone());
+                break;
+            }
+            ChatMessage::Assistant {
+                content: Some(content),
+                ..
+            } => {
+                content.set_cache_control(cache_control.clone());
+                break;
+            }
+            ChatMessage::Tool { content, .. } => {
+                content.set_cache_control(cache_control.clone());
+                break;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// 把提示缓存 key 截断到 64 个字符（OpenAI 限制）。
+fn clamp_prompt_cache_key(key: &str) -> String {
+    key.chars().take(64).collect()
 }
 
 /// 一次请求里跟「思考」相关的字段集合。
@@ -411,11 +606,11 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<ChatMessage> {
     if let Some(system_prompt) = &context.system_prompt {
         messages.push(if use_developer_role {
             ChatMessage::Developer {
-                content: system_prompt.clone(),
+                content: ChatTextContent::Text(system_prompt.clone()),
             }
         } else {
             ChatMessage::System {
-                content: system_prompt.clone(),
+                content: ChatTextContent::Text(system_prompt.clone()),
             }
         });
     }
@@ -428,7 +623,9 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<ChatMessage> {
                 // 部分 Provider 不允许用户消息直接跟在工具结果后面，插一条 assistant 过渡。
                 if compat.requires_assistant_after_tool_result && previous_was_tool_result {
                     messages.push(ChatMessage::Assistant {
-                        content: Some("I have processed the tool results.".to_owned()),
+                        content: Some(ChatTextContent::Text(
+                            "I have processed the tool results.".to_owned(),
+                        )),
                         tool_calls: None,
                         reasoning_content: None,
                     });
@@ -464,6 +661,7 @@ fn convert_user(message: &UserMessage) -> ChatMessage {
                 .map(|block| match block {
                     UserContent::Text(text) => ChatUserPart::Text {
                         text: text.text.clone(),
+                        cache_control: None,
                     },
                     // 图片
                     UserContent::Image(image) => ChatUserPart::ImageUrl {
@@ -510,7 +708,7 @@ fn convert_assistant(
     }
     // 返回这条 assistant 消息；对 DeepSeek 这类厂商额外塞一个空的 reasoning_content。
     Some(ChatMessage::Assistant {
-        content: (!text.is_empty()).then_some(text),
+        content: (!text.is_empty()).then_some(ChatTextContent::Text(text)),
         tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
         // DeepSeek 等要求重放的 assistant 消息带 reasoning_content（可为空串）。
         reasoning_content: compat
@@ -533,13 +731,14 @@ fn convert_tool_result(
         })
         .collect::<Vec<_>>()
         .join("\n");
+    let text = if text.is_empty() {
+        "(no tool output)".to_owned()
+    } else {
+        text
+    };
     ChatMessage::Tool {
         tool_call_id: message.tool_call_id.clone(),
-        content: if text.is_empty() {
-            "(no tool output)".to_owned()
-        } else {
-            text
-        },
+        content: ChatTextContent::Text(text),
         name: compat
             .requires_tool_result_name
             .then(|| message.tool_name.clone()),
@@ -555,6 +754,7 @@ fn convert_tool(tool: &Tool, compat: &ResolvedOpenAICompletionsCompat) -> ChatTo
             parameters: tool.parameters.clone(),
             // 支持 strict 的 Provider 带上 strict: false（表示不强制）。
             strict: compat.supports_strict_mode.then_some(false),
+            cache_control: None,
         },
     }
 }

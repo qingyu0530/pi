@@ -22,6 +22,18 @@ use crate::message::{
 };
 use crate::model::{Model, ModelThinkingLevel};
 
+/// 提示缓存保留策略。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CacheRetention {
+    /// 不使用缓存。
+    None,
+    /// 短时缓存（默认）。
+    #[default]
+    Short,
+    /// 长时缓存。
+    Long,
+}
+
 /// 一次模型请求的可选参数。
 ///
 /// 由调用方（Agent / CLI）填充，Provider 读取后影响构造出的请求。
@@ -38,6 +50,8 @@ pub struct RequestOptions {
     /// 会话 id；用于会话亲和请求头，让同一会话的请求粘到同一后端副本。
     /// 用会话 id 把请求“粘”到同一台副本，让提示缓存持续命中，省时省钱
     pub session_id: Option<String>,
+    /// 提示缓存保留策略；`None` 表示按默认（short）。
+    pub cache_retention: Option<CacheRetention>,
 }
 
 /// 运行时单元：持有模型目录，并把一次请求转换成流式事件。

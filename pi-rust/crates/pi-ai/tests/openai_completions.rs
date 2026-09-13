@@ -5,12 +5,12 @@ use pi_ai::api::openai_completions::{
     map_stop_reason, parse_usage,
 };
 use pi_ai::{
-    AssistantContent, AssistantMessage, AssistantMessageEvent, AssistantRole, Context,
-    ConversationMessage, ImageContent, InputType, MaxTokensField, Model, ModelCompat, ModelCost,
-    ModelCostRates, ModelCostTier, ModelThinkingLevel, OpenAICompletionsCompat, OpenRouterRouting,
-    Provider, RequestOptions, StopReason, TextContent, Tool, ToolCall, ToolResultContent,
-    ToolResultMessage, ToolResultRole, Usage, UsageCost, UserContent, UserMessage,
-    UserMessageContent, UserRole, VercelGatewayRouting, calculate_cost,
+    AssistantContent, AssistantMessage, AssistantMessageEvent, AssistantRole, CacheControlFormat,
+    CacheRetention, Context, ConversationMessage, ImageContent, InputType, MaxTokensField, Model,
+    ModelCompat, ModelCost, ModelCostRates, ModelCostTier, ModelThinkingLevel,
+    OpenAICompletionsCompat, OpenRouterRouting, Provider, RequestOptions, StopReason, TextContent,
+    Tool, ToolCall, ToolResultContent, ToolResultMessage, ToolResultRole, Usage, UsageCost,
+    UserContent, UserMessage, UserMessageContent, UserRole, VercelGatewayRouting, calculate_cost,
     detect_openai_completions_compat,
 };
 use serde_json::json;
@@ -121,6 +121,7 @@ fn request_uses_options_temperature_and_max_tokens() {
         max_tokens: Some(42),
         reasoning_effort: None,
         session_id: None,
+        cache_retention: None,
     };
     let request = build_request(
         &model(),
@@ -1095,4 +1096,144 @@ fn session_affinity_headers_use_openrouter_format() {
     // OpenRouter 只用 x-session-id。
     assert_eq!(header("x-session-id"), Some("sess-2"));
     assert_eq!(header("session_id"), None);
+}
+
+#[test]
+fn prompt_cache_key_sent_for_openai_with_session() {
+    let options = RequestOptions {
+        session_id: Some("sess-1".to_owned()),
+        ..RequestOptions::default()
+    };
+    let request = build_request(
+        &model(),
+        &context(None, vec![user_text("hi").into()]),
+        &options,
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(value["prompt_cache_key"], "sess-1");
+    // 默认 short，不发保留时长。
+    assert!(value.get("prompt_cache_retention").is_none());
+}
+
+#[test]
+fn long_cache_retention_sends_24h_and_key() {
+    let options = RequestOptions {
+        session_id: Some("sess-2".to_owned()),
+        cache_retention: Some(CacheRetention::Long),
+        ..RequestOptions::default()
+    };
+    let request = build_request(
+        &model(),
+        &context(None, vec![user_text("hi").into()]),
+        &options,
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(value["prompt_cache_key"], "sess-2");
+    assert_eq!(value["prompt_cache_retention"], "24h");
+}
+
+#[test]
+fn no_cache_fields_when_retention_none() {
+    let options = RequestOptions {
+        session_id: Some("sess-3".to_owned()),
+        cache_retention: Some(CacheRetention::None),
+        ..RequestOptions::default()
+    };
+    let request = build_request(
+        &model(),
+        &context(None, vec![user_text("hi").into()]),
+        &options,
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    assert!(value.get("prompt_cache_key").is_none());
+    assert!(value.get("prompt_cache_retention").is_none());
+}
+
+#[test]
+fn prompt_cache_key_clamped_to_64_chars() {
+    let options = RequestOptions {
+        session_id: Some("x".repeat(100)),
+        ..RequestOptions::default()
+    };
+    let request = build_request(
+        &model(),
+        &context(None, vec![user_text("hi").into()]),
+        &options,
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(value["prompt_cache_key"].as_str().unwrap().len(), 64);
+}
+
+#[test]
+fn anthropic_cache_control_marks_system_tool_and_last_message() {
+    let mut compatible = model();
+    with_compat(
+        &mut compatible,
+        OpenAICompletionsCompat {
+            cache_control_format: Some(CacheControlFormat::Anthropic),
+            ..OpenAICompletionsCompat::default()
+        },
+    );
+    let tool_context = Context {
+        system_prompt: Some("sys".to_owned()),
+        messages: vec![user_text("hi").into()],
+        tools: Some(vec![Tool {
+            name: "read".to_owned(),
+            description: "读取文件".to_owned(),
+            parameters: json!({ "type": "object" }),
+            constrained_sampling: None,
+        }]),
+    };
+
+    let request = build_request(&compatible, &tool_context, &RequestOptions::default());
+    let value = serde_json::to_value(request).unwrap();
+
+    // 系统提示转成 parts 并带 cache_control。
+    assert_eq!(value["messages"][0]["role"], "system");
+    assert_eq!(value["messages"][0]["content"][0]["text"], "sys");
+    assert_eq!(
+        value["messages"][0]["content"][0]["cache_control"]["type"],
+        "ephemeral"
+    );
+    // 最后一个工具带 cache_control。
+    assert_eq!(
+        value["tools"][0]["function"]["cache_control"]["type"],
+        "ephemeral"
+    );
+    // 最后一条对话消息（user）带 cache_control。
+    let last = value["messages"].as_array().unwrap().last().unwrap();
+    assert_eq!(last["role"], "user");
+    assert_eq!(last["content"][0]["cache_control"]["type"], "ephemeral");
+}
+
+#[test]
+fn anthropic_cache_control_ttl_for_long_retention() {
+    let mut compatible = model();
+    with_compat(
+        &mut compatible,
+        OpenAICompletionsCompat {
+            cache_control_format: Some(CacheControlFormat::Anthropic),
+            ..OpenAICompletionsCompat::default()
+        },
+    );
+    let options = RequestOptions {
+        cache_retention: Some(CacheRetention::Long),
+        ..RequestOptions::default()
+    };
+
+    let request = build_request(
+        &compatible,
+        &context(Some("sys"), vec![user_text("hi").into()]),
+        &options,
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(
+        value["messages"][0]["content"][0]["cache_control"]["ttl"],
+        "1h"
+    );
 }
