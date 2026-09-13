@@ -16,7 +16,7 @@ use crate::api::http::{HttpError, HttpRequest, HttpTransport};
 use crate::api::openai_compat::{
     ResolvedOpenAICompletionsCompat, resolve_openai_completions_compat,
 };
-use crate::compat::{MaxTokensField, OpenRouterRouting, VercelGatewayRouting};
+use crate::compat::{MaxTokensField, OpenRouterRouting, ThinkingFormat, VercelGatewayRouting};
 use crate::content::{
     AssistantContent, TextContent, ThinkingContent, ToolCall, ToolResultContent, UserContent,
 };
@@ -26,7 +26,7 @@ use crate::message::{
     AssistantMessage, AssistantRole, ConversationMessage, StopReason, ToolResultMessage, Usage,
     UsageCost, UserMessage, UserMessageContent,
 };
-use crate::model::{Model, calculate_cost};
+use crate::model::{Model, ModelThinkingLevel, calculate_cost};
 use crate::provider::{Provider, RequestOptions};
 
 /// `POST /chat/completions` 的请求体。
@@ -64,6 +64,15 @@ pub struct ChatRequest {
     /// 模型每一步不是直接输出一个词，而是先算出所有候选词的概率分布。温度 T 在归一化成概率之前缩放这些分数（logits）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
+    /// OpenAI / DeepSeek 风格的推理强度字段。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// DeepSeek / zai 的 thinking 开关。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingParam>,
+    /// OpenRouter 的推理配置。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ReasoningParam>,
     /// 本次可用的工具定义。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ChatTool>>,
@@ -81,6 +90,22 @@ pub struct StreamOptions {
 #[derive(Clone, Debug, Serialize)]
 pub struct VercelProviderOptions {
     pub gateway: VercelGatewayRouting,
+}
+
+/// DeepSeek / zai 的 `thinking` 参数：开或关。
+#[derive(Clone, Debug, Serialize)]
+pub struct ThinkingParam {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clear_thinking: Option<bool>,
+}
+
+/// OpenRouter 的 `reasoning` 参数。
+#[derive(Clone, Debug, Serialize)]
+pub struct ReasoningParam {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 /// 一条 OpenAI chat 消息，用 `role` 字段区分四种形状。
@@ -219,6 +244,8 @@ pub fn build_request(model: &Model, context: &Context, options: &RequestOptions)
             gateway: routing.clone(),
         })
     });
+    // 按 thinking_format 把 reasoning_effort 变成各厂商要求的思考字段。
+    let thinking = resolve_thinking_params(model, &compat, options);
     ChatRequest {
         model: model.id.clone(),
         messages: convert_messages(model, context),
@@ -233,6 +260,9 @@ pub fn build_request(model: &Model, context: &Context, options: &RequestOptions)
         provider: compat.open_router_routing.clone(),
         provider_options,
         temperature: options.temperature,
+        reasoning_effort: thinking.reasoning_effort,
+        thinking: thinking.thinking,
+        reasoning: thinking.reasoning,
         // 把 Context 里的工具列表逐条翻译成 OpenAI 的工具定义；每条都要把 compat 传进去，因为「要不要带 strict」取决于 compat
         tools: context.tools.as_ref().map(|tools| {
             tools
@@ -240,6 +270,124 @@ pub fn build_request(model: &Model, context: &Context, options: &RequestOptions)
                 .map(|tool| convert_tool(tool, &compat))
                 .collect()
         }),
+    }
+}
+
+/// 一次请求里跟「思考」相关的字段集合。
+#[derive(Clone, Debug, Default)]
+struct ThinkingParams {
+    reasoning_effort: Option<String>,
+    thinking: Option<ThinkingParam>,
+    reasoning: Option<ReasoningParam>,
+}
+
+/// 按 `thinking_format` 把 `reasoning_effort` 翻译成服务端要的字段。
+///
+/// 目前支持三种常见格式：OpenAI 风格（`reasoning_effort`）、
+/// DeepSeek（`thinking` + `reasoning_effort`）、OpenRouter（`reasoning.effort`）。
+/// 其余格式（zai/qwen/chat-template 等）暂按 OpenAI 风格处理。
+fn resolve_thinking_params(
+    model: &Model,
+    compat: &ResolvedOpenAICompletionsCompat,
+    options: &RequestOptions,
+) -> ThinkingParams {
+    let mut params = ThinkingParams::default();
+    // 非推理模型不发送任何思考参数。
+    if !model.reasoning {
+        return params;
+    }
+    let effort = options.reasoning_effort;
+    // 模型是否显式把 off 标记为不支持（映射值为 null）。
+    let off_is_disabled = model
+        .thinking_level_map
+        .as_ref()
+        .is_some_and(|map| matches!(map.get(&ModelThinkingLevel::Off), Some(None)));
+
+    match compat.thinking_format {
+        // deepseek分支
+        // DeepSeek 要一个 thinking 对象 + 可选 reasoning_effort。
+        ThinkingFormat::Deepseek => {
+            if effort.is_some() {
+                params.thinking = Some(ThinkingParam {
+                    kind: "enabled".to_owned(),
+                    clear_thinking: None,
+                });
+            } else if !off_is_disabled {
+                params.thinking = Some(ThinkingParam {
+                    kind: "disabled".to_owned(),
+                    clear_thinking: None,
+                });
+            }
+            if let Some(level) = effort {
+                if compat.supports_reasoning_effort {
+                    params.reasoning_effort = Some(mapped_effort(model, level));
+                }
+            }
+        }
+        // OpenRouter 用 reasoning: {effort}
+        ThinkingFormat::Openrouter => {
+            let value = if let Some(level) = effort {
+                Some(mapped_effort(model, level))
+            } else if !off_is_disabled {
+                Some(off_effort(model))
+            } else {
+                None
+            };
+            if let Some(effort) = value {
+                params.reasoning = Some(ReasoningParam {
+                    effort: Some(effort),
+                });
+            }
+        }
+        // OpenAI 风格，直接发 reasoning_effort
+        _ => {
+            if !compat.supports_reasoning_effort {
+                return params;
+            }
+            if let Some(level) = effort {
+                params.reasoning_effort = Some(mapped_effort(model, level));
+            } else if let Some(Some(value)) = model
+                .thinking_level_map
+                .as_ref()
+                .and_then(|map| map.get(&ModelThinkingLevel::Off))
+            {
+                params.reasoning_effort = Some(value.clone());
+            }
+        }
+    }
+    params
+}
+
+/// 取某个思考级别对应的服务端取值：模型显式映射优先，否则用级别名字。
+fn mapped_effort(model: &Model, level: ModelThinkingLevel) -> String {
+    model
+        .thinking_level_map
+        .as_ref()
+        .and_then(|map| map.get(&level))
+        .and_then(|value| value.clone())
+        .unwrap_or_else(|| model_thinking_level_name(level).to_owned())
+}
+
+/// off 级别对应的取值；没有映射时用 "none"。
+fn off_effort(model: &Model) -> String {
+    model
+        .thinking_level_map
+        .as_ref()
+        .and_then(|map| map.get(&ModelThinkingLevel::Off))
+        .and_then(|value| value.clone())
+        .unwrap_or_else(|| "none".to_owned())
+}
+
+/// 思考级别对应的字符串（与 JSON 里的取值一致）。
+fn model_thinking_level_name(level: ModelThinkingLevel) -> &'static str {
+    match level {
+        ModelThinkingLevel::Off => "off",
+        ModelThinkingLevel::Minimal => "minimal",
+        ModelThinkingLevel::Low => "low",
+        ModelThinkingLevel::Medium => "medium",
+        ModelThinkingLevel::High => "high",
+        ModelThinkingLevel::Xhigh => "xhigh",
+        ModelThinkingLevel::Max => "max",
     }
 }
 

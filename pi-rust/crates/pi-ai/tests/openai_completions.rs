@@ -7,10 +7,11 @@ use pi_ai::api::openai_completions::{
 use pi_ai::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, AssistantRole, Context,
     ConversationMessage, ImageContent, InputType, MaxTokensField, Model, ModelCompat, ModelCost,
-    ModelCostRates, ModelCostTier, OpenAICompletionsCompat, OpenRouterRouting, Provider,
-    RequestOptions, StopReason, TextContent, Tool, ToolCall, ToolResultContent, ToolResultMessage,
-    ToolResultRole, Usage, UsageCost, UserContent, UserMessage, UserMessageContent, UserRole,
-    VercelGatewayRouting, calculate_cost, detect_openai_completions_compat,
+    ModelCostRates, ModelCostTier, ModelThinkingLevel, OpenAICompletionsCompat, OpenRouterRouting,
+    Provider, RequestOptions, StopReason, TextContent, Tool, ToolCall, ToolResultContent,
+    ToolResultMessage, ToolResultRole, Usage, UsageCost, UserContent, UserMessage,
+    UserMessageContent, UserRole, VercelGatewayRouting, calculate_cost,
+    detect_openai_completions_compat,
 };
 use serde_json::json;
 use std::cell::RefCell;
@@ -118,6 +119,7 @@ fn request_uses_options_temperature_and_max_tokens() {
     let options = RequestOptions {
         temperature: Some(0.7),
         max_tokens: Some(42),
+        reasoning_effort: None,
     };
     let request = build_request(
         &model(),
@@ -914,4 +916,106 @@ fn assistant_reasoning_content_added_for_deepseek() {
 
     assert_eq!(value[0]["role"], "assistant");
     assert_eq!(value[0]["reasoning_content"], "");
+}
+
+#[test]
+fn openai_style_reasoning_effort_is_sent() {
+    let mut reasoning = model();
+    reasoning.reasoning = true;
+    let options = RequestOptions {
+        reasoning_effort: Some(ModelThinkingLevel::High),
+        ..RequestOptions::default()
+    };
+
+    let request = build_request(
+        &reasoning,
+        &context(None, vec![user_text("hi").into()]),
+        &options,
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(value["reasoning_effort"], "high");
+}
+
+#[test]
+fn reasoning_effort_uses_model_mapping() {
+    let mut reasoning = model();
+    reasoning.reasoning = true;
+    reasoning.thinking_level_map = Some(std::collections::HashMap::from([(
+        ModelThinkingLevel::High,
+        Some("high-mapped".to_owned()),
+    )]));
+    let options = RequestOptions {
+        reasoning_effort: Some(ModelThinkingLevel::High),
+        ..RequestOptions::default()
+    };
+
+    let request = build_request(
+        &reasoning,
+        &context(None, vec![user_text("hi").into()]),
+        &options,
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(value["reasoning_effort"], "high-mapped");
+}
+
+#[test]
+fn deepseek_effort_sets_thinking_and_reasoning_effort() {
+    let mut deepseek = model();
+    deepseek.provider = "deepseek".to_owned();
+    deepseek.base_url = "https://api.deepseek.com/v1".to_owned();
+    deepseek.reasoning = true;
+    let options = RequestOptions {
+        reasoning_effort: Some(ModelThinkingLevel::Medium),
+        ..RequestOptions::default()
+    };
+
+    let request = build_request(
+        &deepseek,
+        &context(None, vec![user_text("hi").into()]),
+        &options,
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(value["thinking"]["type"], "enabled");
+    assert_eq!(value["reasoning_effort"], "medium");
+}
+
+#[test]
+fn deepseek_without_effort_disables_thinking() {
+    let mut deepseek = model();
+    deepseek.provider = "deepseek".to_owned();
+    deepseek.base_url = "https://api.deepseek.com/v1".to_owned();
+    deepseek.reasoning = true;
+
+    let request = build_request(
+        &deepseek,
+        &context(None, vec![user_text("hi").into()]),
+        &RequestOptions::default(),
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(value["thinking"]["type"], "disabled");
+}
+
+#[test]
+fn openrouter_effort_uses_reasoning_object() {
+    let mut openrouter = model();
+    openrouter.provider = "openrouter".to_owned();
+    openrouter.base_url = "https://openrouter.ai/api/v1".to_owned();
+    openrouter.reasoning = true;
+    let options = RequestOptions {
+        reasoning_effort: Some(ModelThinkingLevel::Low),
+        ..RequestOptions::default()
+    };
+
+    let request = build_request(
+        &openrouter,
+        &context(None, vec![user_text("hi").into()]),
+        &options,
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(value["reasoning"]["effort"], "low");
 }

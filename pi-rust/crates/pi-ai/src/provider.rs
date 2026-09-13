@@ -20,7 +20,7 @@ use crate::message::{
     AssistantMessage, AssistantRole, ConversationMessage, StopReason, Usage, UsageCost,
     UserMessageContent,
 };
-use crate::model::Model;
+use crate::model::{Model, ModelThinkingLevel};
 
 /// 一次模型请求的可选参数。
 ///
@@ -33,6 +33,8 @@ pub struct RequestOptions {
     pub temperature: Option<f64>,
     /// 覆盖模型默认的最大输出 token；`None` 表示用 `Model.max_tokens`。
     pub max_tokens: Option<u64>,
+    /// 推理/思考级别；`None` 表示不特别指定（交给服务端或模型默认）。
+    pub reasoning_effort: Option<ModelThinkingLevel>,
 }
 
 /// 运行时单元：持有模型目录，并把一次请求转换成流式事件。
@@ -61,7 +63,7 @@ pub trait Provider {
     /// 返回的是 Box<dyn Iterator<...>>——一个“被装箱的泛型迭代器对象”。
     /// 调用方只需 next() 逐个取出事件，不关心底层是 Vec 还是别的来源。
     /// C++ 对照：类似一个返回生成器/范围的虚函数。
-    /// 
+    ///
     /// 把「请求选项」作为第三个参数加进 Provider 接口。从此每个 Provider 实现、每个调用方都要带上它。
     fn stream(
         &self,
