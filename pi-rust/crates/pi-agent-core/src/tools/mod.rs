@@ -1,5 +1,6 @@
 //! 内置工具实现。
 
+mod bash;
 mod edit;
 mod find;
 mod grep;
@@ -8,6 +9,7 @@ mod read;
 mod walk;
 mod write;
 
+pub use bash::BashTool;
 pub use edit::EditTool;
 pub use find::FindTool;
 pub use grep::GrepTool;

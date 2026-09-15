@@ -1,8 +1,8 @@
 use std::io::{self, Write};
 
 use pi_agent_core::{
-    Agent, AgentEvent, DEFAULT_COMPACTION_SETTINGS, EditTool, FindTool, GrepTool, LsTool, ReadTool,
-    RealEnvironment, Session, WriteTool,
+    Agent, AgentEvent, BashTool, DEFAULT_COMPACTION_SETTINGS, EditTool, FindTool, GrepTool, LsTool,
+    ReadTool, RealEnvironment, RealShell, Session, WriteTool,
 };
 use pi_ai::{
     AssistantMessageEvent, FauxProvider, FauxResponse, InputType, Model, ModelCost, ModelCostRates,
@@ -71,6 +71,7 @@ fn register_tools(agent: &mut Agent) {
     agent.add_tool(Box::new(LsTool::new(Box::new(RealEnvironment))));
     agent.add_tool(Box::new(FindTool::new(Box::new(RealEnvironment))));
     agent.add_tool(Box::new(GrepTool::new(Box::new(RealEnvironment))));
+    agent.add_tool(Box::new(BashTool::new(Box::new(RealShell))));
 }
 
 /// 根据环境变量与内置模型目录创建 Agent。

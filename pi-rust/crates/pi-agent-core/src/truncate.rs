@@ -74,6 +74,45 @@ pub fn truncate_head(content: &str, max_lines: usize, max_bytes: usize) -> Trunc
     }
 }
 
+/// 从尾部保留内容，直到遇到行数或字节上限。
+///
+/// 和 `truncate_head` 相反：命令输出往往「结尾才重要」（错误、结果），
+/// 所以保留末尾。同样只保留完整行，不返回半行。
+#[must_use]
+pub fn truncate_tail(content: &str, max_lines: usize, max_bytes: usize) -> TruncationResult {
+    let lines: Vec<&str> = content.split('\n').collect();
+    let total_lines = lines.len();
+    let mut selected: Vec<&str> = Vec::new(); // 先按「从后往前」收集
+    let mut byte_count = 0usize;
+    let mut truncated_by = None;
+
+    for (index, line) in lines.iter().rev().enumerate() {
+        if index >= max_lines {
+            truncated_by = Some(TruncatedBy::Lines);
+            break;
+        }
+        let separator = usize::from(!selected.is_empty());
+        if byte_count + separator + line.len() > max_bytes {
+            truncated_by = Some(TruncatedBy::Bytes);
+            break;
+        }
+        byte_count += separator + line.len();
+        selected.push(line);
+    }
+
+    // 收集时是从后往前，拼回时要反过来恢复原顺序。
+    selected.reverse();
+
+    let output_lines = selected.len();
+    TruncationResult {
+        content: selected.join("\n"),
+        truncated: truncated_by.is_some(),
+        truncated_by,
+        total_lines,
+        output_lines,
+    }
+}
+
 /// 把单行截断到 `max_chars` 个字符，超出时追加 `... [truncated]`。  超出就截断并加后缀
 ///
 /// 返回 `(截断后的文本, 是否发生了截断)`。
@@ -85,5 +124,36 @@ pub fn truncate_line(line: &str, max_chars: usize) -> (String, bool) {
     } else {
         let kept: String = line.chars().take(max_chars).collect();
         (format!("{kept}... [truncated]"), true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TruncatedBy, truncate_tail};
+
+    #[test]
+    fn tail_keeps_last_lines() {
+        let result = truncate_tail("a\nb\nc\nd", 2, 1024);
+        assert_eq!(result.content, "c\nd");
+        assert!(result.truncated);
+        assert_eq!(result.truncated_by, Some(TruncatedBy::Lines));
+        assert_eq!(result.total_lines, 4);
+        assert_eq!(result.output_lines, 2);
+    }
+
+    #[test]
+    fn tail_keeps_last_bytes() {
+        // 每行 3 字节 + 换行；给 4 字节只能容纳最后一行 "cc"。
+        let result = truncate_tail("aa\nbb\ncc", 100, 4);
+        assert_eq!(result.content, "cc");
+        assert_eq!(result.truncated_by, Some(TruncatedBy::Bytes));
+    }
+
+    #[test]
+    fn tail_without_truncation_returns_all() {
+        let result = truncate_tail("a\nb", 100, 1024);
+        assert_eq!(result.content, "a\nb");
+        assert!(!result.truncated);
+        assert_eq!(result.truncated_by, None);
     }
 }

@@ -12,6 +12,7 @@ mod compaction;
 mod environment;
 mod event;
 mod session;
+mod shell;
 mod tool;
 mod tools;
 mod truncate;
@@ -24,8 +25,9 @@ pub use compaction::{
 pub use environment::{DirEntry, EnvError, Environment, RealEnvironment};
 pub use event::AgentEvent;
 pub use session::{Entry, Session, SessionError};
+pub use shell::{RealShell, Shell, ShellError, ShellOutput};
 pub use tool::{AgentTool, EchoTool, ToolError, ToolResult};
-pub use tools::{EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool};
+pub use tools::{BashTool, EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool};
 
 use pi_ai::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, Context, ConversationMessage, Model,
