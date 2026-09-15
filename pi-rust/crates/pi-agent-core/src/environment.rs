@@ -27,6 +27,20 @@ impl std::fmt::Display for EnvError {
     }
 }
 
+/// 目录中的一个条目。
+///
+/// 只保留列目录需要的两个字段：名字和「是否为目录」。
+/// 不存完整路径，因为调用方已经知道父目录，拼起来即可。
+///
+/// C++ 对照：类似 `std::filesystem::directory_entry` 的精简版。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DirEntry {
+    /// 条目名（不含父目录部分）。
+    pub name: String,
+    /// 是否为目录。
+    pub is_dir: bool,
+}
+
 /// 工具可使用的环境能力。   核心 trait
 pub trait Environment {
     /// 读取文件为 UTF-8 文本。
@@ -34,6 +48,12 @@ pub trait Environment {
 
     /// 覆盖写入文件。
     fn write_file(&self, path: &str, content: &str) -> Result<(), EnvError>;
+
+    /// 列出目录内容（不递归）。
+    ///
+    /// 路径不存在、不是目录或无权访问时返回 `Err`。
+    /// C++ 对照：类似用 `std::filesystem::directory_iterator` 把条目一次性收进 `vector`。
+    fn read_dir(&self, path: &str) -> Result<Vec<DirEntry>, EnvError>;
 }
 
 /// 使用真实文件系统的实现。 用真实文件系统实现 trait
@@ -49,5 +69,27 @@ impl Environment for RealEnvironment {
     fn write_file(&self, path: &str, content: &str) -> Result<(), EnvError> {
         std::fs::write(path, content)
             .map_err(|error| EnvError::new(format!("写入文件 `{path}` 失败: {error}")))
+    }
+    /// 用真实文件系统实现上面那个接口。输入一个目录路径，输出该目录下的条目列表
+    fn read_dir(&self, path: &str) -> Result<Vec<DirEntry>, EnvError> {
+        // read_dir 返回一个迭代器，每个元素是 Result<DirEntry, io::Error>。
+        let entries = std::fs::read_dir(path)
+            .map_err(|error| EnvError::new(format!("读取目录 `{path}` 失败: {error}")))?;
+
+        let mut result = Vec::new();
+        for entry in entries {
+            // 单个条目也可能读失败（例如权限问题），这里直接向上报错。
+            let entry = entry
+                .map_err(|error| EnvError::new(format!("读取目录 `{path}` 的条目失败: {error}")))?;
+            // 文件名可能不是合法 UTF-8，用 lossy 转换避免报错（Unix 上文件名是任意字节）。
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // file_type 可能失败，失败时保守地当成「不是目录」。
+            let is_dir = entry
+                .file_type()
+                .map(|file_type| file_type.is_dir())
+                .unwrap_or(false);
+            result.push(DirEntry { name, is_dir });
+        }
+        Ok(result)
     }
 }

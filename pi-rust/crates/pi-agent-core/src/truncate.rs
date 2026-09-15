@@ -10,6 +10,8 @@
 pub const DEFAULT_MAX_LINES: usize = 2000;
 /// 默认最大字节数（50KB）。
 pub const DEFAULT_MAX_BYTES: usize = 50 * 1024;
+/// grep 匹配行的最大字符数。
+pub const GREP_MAX_LINE_LENGTH: usize = 500;
 
 /// 触发截断的限制。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -69,5 +71,19 @@ pub fn truncate_head(content: &str, max_lines: usize, max_bytes: usize) -> Trunc
         truncated_by,
         total_lines,
         output_lines,
+    }
+}
+
+/// 把单行截断到 `max_chars` 个字符，超出时追加 `... [truncated]`。  超出就截断并加后缀
+///
+/// 返回 `(截断后的文本, 是否发生了截断)`。
+/// 用 `chars().count()` 按 Unicode 字符数（不是字节数）计算。
+#[must_use]
+pub fn truncate_line(line: &str, max_chars: usize) -> (String, bool) {
+    if line.chars().count() <= max_chars {
+        (line.to_owned(), false)
+    } else {
+        let kept: String = line.chars().take(max_chars).collect();
+        (format!("{kept}... [truncated]"), true)
     }
 }

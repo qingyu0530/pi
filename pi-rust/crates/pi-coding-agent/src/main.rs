@@ -1,8 +1,8 @@
 use std::io::{self, Write};
 
 use pi_agent_core::{
-    Agent, AgentEvent, DEFAULT_COMPACTION_SETTINGS, EditTool, ReadTool, RealEnvironment, Session,
-    WriteTool,
+    Agent, AgentEvent, DEFAULT_COMPACTION_SETTINGS, EditTool, FindTool, GrepTool, LsTool, ReadTool,
+    RealEnvironment, Session, WriteTool,
 };
 use pi_ai::{
     AssistantMessageEvent, FauxProvider, FauxResponse, InputType, Model, ModelCost, ModelCostRates,
@@ -68,12 +68,16 @@ fn register_tools(agent: &mut Agent) {
     agent.add_tool(Box::new(ReadTool::new(Box::new(RealEnvironment))));
     agent.add_tool(Box::new(WriteTool::new(Box::new(RealEnvironment))));
     agent.add_tool(Box::new(EditTool::new(Box::new(RealEnvironment))));
+    agent.add_tool(Box::new(LsTool::new(Box::new(RealEnvironment))));
+    agent.add_tool(Box::new(FindTool::new(Box::new(RealEnvironment))));
+    agent.add_tool(Box::new(GrepTool::new(Box::new(RealEnvironment))));
 }
 
 /// 根据环境变量与内置模型目录创建 Agent。
 ///
 /// - `PI_PROVIDER` / `PI_MODEL` 选择模型（默认 openai/gpt-4o-mini）。
 /// - 有 `OPENAI_API_KEY` 且模型存在时走真实 Provider，否则回退 Faux 演示。
+///
 /// 决定用真实 Provider 还是 Faux，并选出模型。
 fn build_agent() -> (Agent, String) {
     let registry = ModelRegistry::builtin();

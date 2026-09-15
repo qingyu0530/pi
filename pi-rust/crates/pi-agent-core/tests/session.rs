@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use pi_agent_core::{Entry, EnvError, Environment, Session};
+use pi_agent_core::{DirEntry, Entry, EnvError, Environment, Session};
 use pi_ai::{
     AssistantContent, AssistantMessage, AssistantRole, ConversationMessage, StopReason,
     TextContent, Usage, UsageCost, UserMessage, UserMessageContent, UserRole,
@@ -29,6 +29,34 @@ impl Environment for FakeEnv {
             .borrow_mut()
             .insert(path.to_owned(), content.to_owned());
         Ok(())
+    }
+
+    fn read_dir(&self, path: &str) -> Result<Vec<DirEntry>, EnvError> {
+        // 内存里只存文件，从文件路径反推目录结构（与 tools 测试同一套思路）。
+        let prefix = format!("{}/", path.trim_end_matches('/'));
+        let files = self.files.borrow();
+        let mut entries: std::collections::BTreeMap<String, bool> =
+            std::collections::BTreeMap::new();
+        for key in files.keys() {
+            let Some(rest) = key.strip_prefix(&prefix) else {
+                continue;
+            };
+            match rest.split_once('/') {
+                Some((name, _)) => {
+                    entries.insert(name.to_owned(), true);
+                }
+                None => {
+                    entries.insert(rest.to_owned(), false);
+                }
+            }
+        }
+        if entries.is_empty() {
+            return Err(EnvError::new(format!("目录不存在: {path}")));
+        }
+        Ok(entries
+            .into_iter()
+            .map(|(name, is_dir)| DirEntry { name, is_dir })
+            .collect())
     }
 }
 

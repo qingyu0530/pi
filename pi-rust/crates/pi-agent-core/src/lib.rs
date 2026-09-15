@@ -21,11 +21,11 @@ pub use compaction::{
     DEFAULT_COMPACTION_SETTINGS, build_summary_prompt, compact, estimate_context_tokens,
     estimate_tokens, plan_compaction, should_compact,
 };
-pub use environment::{EnvError, Environment, RealEnvironment};
+pub use environment::{DirEntry, EnvError, Environment, RealEnvironment};
 pub use event::AgentEvent;
 pub use session::{Entry, Session, SessionError};
 pub use tool::{AgentTool, EchoTool, ToolError, ToolResult};
-pub use tools::{EditTool, ReadTool, WriteTool};
+pub use tools::{EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool};
 
 use pi_ai::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, Context, ConversationMessage, Model,
