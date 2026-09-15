@@ -1,15 +1,15 @@
 use std::io::{self, Write};
 
 use pi_agent_core::{
-    Agent, AgentEvent, BashTool, DEFAULT_COMPACTION_SETTINGS, EditTool, FindTool, GrepTool, LsTool,
-    ReadTool, RealEnvironment, RealShell, Session, WriteTool,
+    Agent, BashTool, DEFAULT_COMPACTION_SETTINGS, EditTool, FindTool, GrepTool, LsTool, ReadTool,
+    RealEnvironment, RealShell, Session, WriteTool,
 };
 use pi_ai::{
-    AssistantMessageEvent, FauxProvider, FauxResponse, InputType, Model, ModelCost, ModelCostRates,
-    ModelRegistry, ModelThinkingLevel, OpenAiCompletionsProvider, RequestOptions, StopReason,
-    UreqTransport, UserMessage, UserMessageContent, UserRole,
+    FauxProvider, FauxResponse, InputType, Model, ModelCost, ModelCostRates, ModelRegistry,
+    ModelThinkingLevel, OpenAiCompletionsProvider, RequestOptions, StopReason, UreqTransport,
+    UserMessage, UserMessageContent, UserRole,
 };
-use pi_tui::{PlainRenderer, Renderer};
+use pi_tui::{EventRenderer, PlainRenderer, Renderer};
 
 mod args;
 
@@ -140,7 +140,8 @@ struct Cli {
 }
 
 impl Cli {
-    fn new(args: &Args) -> io::Result<Self> { // 按参数装配整个会话：会话文件、Agent、请求选项、工具、历史回放。
+    fn new(args: &Args) -> io::Result<Self> {
+        // 按参数装配整个会话：会话文件、Agent、请求选项、工具、历史回放。
         let session_path = args
             .session
             .clone()
@@ -209,25 +210,20 @@ impl Cli {
             timestamp: 0,
         });
 
+        // 用 pi-tui 的事件渲染器做增量渲染。
+        let mut renderer = EventRenderer::new(Box::new(PlainRenderer));
+        let mut render_error: Option<io::Error> = None;
         let reply = self
             .agent
-            .run(&mut |event| match &event {
-                AgentEvent::MessageUpdate { event, .. } => {
-                    if let AssistantMessageEvent::TextDelta { delta, .. } = event.as_ref() {
-                        print!("{delta}");
-                        let _ = io::stdout().flush();
-                    }
+            .run(&mut |event| {
+                if let Err(error) = renderer.handle(&event) {
+                    render_error.get_or_insert(error);
                 }
-                AgentEvent::ToolExecutionEnd {
-                    tool_name,
-                    is_error,
-                    ..
-                } => {
-                    eprintln!("\n[工具 {tool_name} 执行完成, is_error={is_error}]");
-                }
-                _ => {}
             })
             .map_err(|error| io::Error::other(format!("{error:?}")))?;
+        if let Some(error) = render_error {
+            return Err(error);
+        }
         println!();
 
         if reply.stop_reason == StopReason::Error {
