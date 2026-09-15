@@ -6,12 +6,16 @@ use pi_agent_core::{
 };
 use pi_ai::{
     AssistantMessageEvent, FauxProvider, FauxResponse, InputType, Model, ModelCost, ModelCostRates,
-    ModelRegistry, OpenAiCompletionsProvider, RequestOptions, StopReason, UreqTransport,
-    UserMessage, UserMessageContent, UserRole,
+    ModelRegistry, ModelThinkingLevel, OpenAiCompletionsProvider, RequestOptions, StopReason,
+    UreqTransport, UserMessage, UserMessageContent, UserRole,
 };
 use pi_tui::{PlainRenderer, Renderer};
 
-/// 默认的会话文件（可用 `PI_SESSION` 环境变量覆盖）。
+mod args;
+
+use args::{Args, ListModels, help_text, parse_args};
+
+/// 默认的会话文件（可用 `--session` 或 `PI_SESSION` 覆盖）。
 const DEFAULT_SESSION_FILE: &str = "pi-session.jsonl";
 
 /// 演示用的极简模型（没有真实 API Key 时走 Faux）。
@@ -74,19 +78,33 @@ fn register_tools(agent: &mut Agent) {
     agent.add_tool(Box::new(BashTool::new(Box::new(RealShell))));
 }
 
-/// 根据环境变量与内置模型目录创建 Agent。
+/// 根据命令行参数、环境变量与内置模型目录创建 Agent。
 ///
-/// - `PI_PROVIDER` / `PI_MODEL` 选择模型（默认 openai/gpt-4o-mini）。
-/// - 有 `OPENAI_API_KEY` 且模型存在时走真实 Provider，否则回退 Faux 演示。
+/// 优先级：命令行参数 > 环境变量 > 默认值。
+/// - `--provider` / `PI_PROVIDER`、`--model` / `PI_MODEL` 选择模型（默认 openai/gpt-4o-mini）。
+/// - `--api-key` / `OPENAI_API_KEY` 提供密钥；没有则回退 Faux 演示。
 ///
 /// 决定用真实 Provider 还是 Faux，并选出模型。
-fn build_agent() -> (Agent, String) {
+fn build_agent(args: &Args) -> (Agent, String) {
     let registry = ModelRegistry::builtin();
-    let provider_name = std::env::var("PI_PROVIDER").unwrap_or_else(|_| "openai".to_owned());
-    let model_id = std::env::var("PI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_owned());
+    let provider_name = args
+        .provider
+        .clone()
+        .or_else(|| std::env::var("PI_PROVIDER").ok())
+        .unwrap_or_else(|| "openai".to_owned());
+    let model_id = args
+        .model
+        .clone()
+        .or_else(|| std::env::var("PI_MODEL").ok())
+        .unwrap_or_else(|| "gpt-4o-mini".to_owned());
 
-    let Some(api_key) = std::env::var("OPENAI_API_KEY").ok() else {
-        eprintln!("未设置 OPENAI_API_KEY，使用 FauxProvider 演示。");
+    let api_key = args
+        .api_key
+        .clone()
+        .or_else(|| std::env::var("OPENAI_API_KEY").ok());
+
+    let Some(api_key) = api_key else {
+        eprintln!("未提供 API Key（--api-key 或 OPENAI_API_KEY），使用 FauxProvider 演示。");
         return faux_agent(true);
     };
 
@@ -115,25 +133,52 @@ struct Cli {
     env: RealEnvironment, // 真实文件系统
     session_path: String, // 会话文件路径
     model_label: String,
+    /// 是否把会话写盘（`--no-session` 时为 false）。
+    persist_session: bool,
     /// 已经保存进 session 的消息数，用来只追加新消息。
     persisted_messages: usize,
 }
 
 impl Cli {
-    fn new() -> Self {
-        let session_path =
-            std::env::var("PI_SESSION").unwrap_or_else(|_| DEFAULT_SESSION_FILE.to_owned());
+    fn new(args: &Args) -> io::Result<Self> { // 按参数装配整个会话：会话文件、Agent、请求选项、工具、历史回放。
+        let session_path = args
+            .session
+            .clone()
+            .or_else(|| std::env::var("PI_SESSION").ok())
+            .unwrap_or_else(|| DEFAULT_SESSION_FILE.to_owned());
         let env = RealEnvironment;
-        // 文件不存在时从空会话开始。
-        let session = Session::load(&env, &session_path).unwrap_or_default();
-        // 创建 Agent 后，把会话文件路径作为 session id 设进请求选项
-        // 建 Agent、注册工具。
-        let (agent, model_label) = build_agent();
-        // 用会话文件路径作为 session id，供会话亲和请求头使用。
+        // `--no-session` 时不读盘，从空会话开始。
+        let session = if args.no_session {
+            Session::new()
+        } else {
+            Session::load(&env, &session_path).unwrap_or_default()
+        };
+
+        let (agent, model_label) = build_agent(args);
+
+        // 解析思考级别（若给了 --thinking）。
+        let reasoning_effort = match &args.thinking {
+            Some(level) => Some(parse_thinking(level).map_err(io::Error::other)?),
+            None => None,
+        };
+
+        // 会话亲和：用会话文件路径作为 session id（`--no-session` 时不设）。
+        let session_id = if args.no_session {
+            None
+        } else {
+            Some(session_path.clone())
+        };
         let mut agent = agent.with_options(RequestOptions {
-            session_id: Some(session_path.clone()),
+            session_id,
+            reasoning_effort,
             ..RequestOptions::default()
         });
+
+        // 系统提示。
+        if let Some(prompt) = &args.system_prompt {
+            agent = agent.with_system_prompt(prompt.clone());
+        }
+
         register_tools(&mut agent);
         // 把已保存的历史消息回放进 Agent。
         for message in session.messages() {
@@ -142,14 +187,15 @@ impl Cli {
         // 记录初始已保存数
         let persisted_messages = agent.messages().len();
 
-        Self {
+        Ok(Self {
             agent,
             session,
             env,
             session_path,
             model_label,
+            persist_session: !args.no_session,
             persisted_messages,
-        }
+        })
     }
 
     /// 执行一轮对话并持久化。
@@ -217,6 +263,9 @@ impl Cli {
             self.session.push_message(message.clone());
         }
         self.persisted_messages = self.agent.messages().len();
+        if !self.persist_session {
+            return Ok(());
+        }
         self.session // 保存
             .save(&self.env, &self.session_path)
             .map_err(|error| io::Error::other(format!("保存会话失败: {}", error.message)))
@@ -228,6 +277,9 @@ impl Cli {
             self.session.push_message(message.clone());
         }
         self.persisted_messages = self.agent.messages().len();
+        if !self.persist_session {
+            return Ok(());
+        }
         self.session
             .save(&self.env, &self.session_path)
             .map_err(|error| io::Error::other(format!("保存会话失败: {}", error.message)))
@@ -260,8 +312,66 @@ impl Cli {
     }
 }
 
+/// 把 `--thinking` 的字符串映射成思考级别。   把 --thinking 的字符串转成 ModelThinkingLevel；非法值返回错误。
+fn parse_thinking(level: &str) -> Result<ModelThinkingLevel, String> {
+    match level {
+        "off" => Ok(ModelThinkingLevel::Off),
+        "minimal" => Ok(ModelThinkingLevel::Minimal),
+        "low" => Ok(ModelThinkingLevel::Low),
+        "medium" => Ok(ModelThinkingLevel::Medium),
+        "high" => Ok(ModelThinkingLevel::High),
+        "xhigh" => Ok(ModelThinkingLevel::Xhigh),
+        "max" => Ok(ModelThinkingLevel::Max),
+        other => Err(format!(
+            "无效的 thinking 级别: {other}（可选 off/minimal/low/medium/high/xhigh/max）"
+        )),
+    }
+}
+
+/// 打印模型目录，`filter` 可带子串过滤。   
+fn print_models(filter: &ListModels) {
+    let registry = ModelRegistry::builtin();
+    let needle = match filter {
+        ListModels::All => None,
+        ListModels::Search(text) => Some(text.to_lowercase()),
+    };
+    for model in registry.models() {
+        let label = format!("{}/{}", model.provider, model.id);
+        if let Some(needle) = &needle {
+            if !label.to_lowercase().contains(needle.as_str()) {
+                continue;
+            }
+        }
+        println!("{label}  ({})", model.api);
+    }
+}
+// 解析参数 → 处理 --help/--version/--list-models 这些「只打印」模式 → 否则建会话、跑初始消息、进入 REPL 或退出。
 fn main() -> io::Result<()> {
-    let mut cli = Cli::new();
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let args = match parse_args(&raw) {
+        Ok(args) => args,
+        Err(message) => {
+            eprintln!("参数错误: {message}");
+            eprint!("{}", help_text());
+            return Err(io::Error::other("参数解析失败"));
+        }
+    };
+
+    // 只打印信息、不启动会话的模式。
+    if args.help {
+        print!("{}", help_text());
+        return Ok(());
+    }
+    if args.version {
+        println!("Pi Rust {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if let Some(filter) = &args.list_models {
+        print_models(filter);
+        return Ok(());
+    }
+
+    let mut cli = Cli::new(&args)?;
 
     let mut renderer = PlainRenderer;
     renderer.render_line(&format!(
@@ -271,11 +381,16 @@ fn main() -> io::Result<()> {
         cli.session_path
     ))?;
 
-    // 带命令行参数：一次性提问；不带参数：进入交互式对话。
-    match std::env::args().nth(1) {
-        Some(prompt) => cli.run_turn(prompt),
-        None => cli.repl(),
+    // 位置参数先作为初始消息逐条执行。
+    for message in &args.messages {
+        cli.run_turn(message.clone())?;
     }
+
+    // `--print`：处理完就退出；否则进入交互式对话。
+    if args.print {
+        return Ok(());
+    }
+    cli.repl()
 }
 /*
 
