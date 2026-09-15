@@ -23,7 +23,8 @@ impl LsTool {
 }
 
 impl AgentTool for LsTool {
-    fn name(&self) -> &str { // 返回工具名。
+    fn name(&self) -> &str {
+        // 返回工具名。
         "ls"
     }
     // 给模型看的文字说明，描述这个工具干什么、有什么限制

@@ -43,7 +43,7 @@ pub struct ShellOutput {
 }
 
 /// 执行 shell 命令的能力。   规定「执行命令」的能力。
-pub trait Shell { 
+pub trait Shell {
     /// 执行一条命令，返回合并输出、退出码和是否超时。
     ///
     /// `timeout` 为 `None` 表示不限时。

@@ -2,7 +2,7 @@
 //!
 //! 遍历只依赖 `Environment`，不直接碰真实文件系统，所以测试里能用内存实现替换。
 // 深度优先遍历一个目录树下所有文件  给 find 和 grep 复用
-use crate::environment::{EnvError, Environment}; 
+use crate::environment::{EnvError, Environment};
 
 /// 遍历时跳过的目录名：体积大且通常不是搜索目标。  列出遍历时要跳过的目录名，避免钻进 .git、node_modules 这种又大又没用的目录。
 pub(crate) const SKIP_DIRS: [&str; 2] = [".git", "node_modules"];
