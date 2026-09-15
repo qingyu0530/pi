@@ -1,3 +1,5 @@
+use std::io::Read;
+
 use pi_ai::api::http::{HttpError, HttpRequest, HttpTransport};
 use pi_ai::api::openai_completions::{
     ChatCompletionChunk, ChatCompletionStream, ChatMessage, ChunkUsage, CompletionTokensDetails,
@@ -606,9 +608,10 @@ impl FakeTransport {
 }
 
 impl HttpTransport for FakeTransport {
-    fn post(&self, request: &HttpRequest) -> Result<String, HttpError> {
+    fn post(&self, request: &HttpRequest) -> Result<Box<dyn Read>, HttpError> {
         *self.request.borrow_mut() = Some(request.clone());
-        Ok(self.body.clone())
+        // 把预设文本包成内存 reader，模拟流式响应体。
+        Ok(Box::new(std::io::Cursor::new(self.body.clone())))
     }
 }
 
@@ -616,7 +619,7 @@ impl HttpTransport for FakeTransport {
 struct FailingTransport;
 
 impl HttpTransport for FailingTransport {
-    fn post(&self, _request: &HttpRequest) -> Result<String, HttpError> {
+    fn post(&self, _request: &HttpRequest) -> Result<Box<dyn Read>, HttpError> {
         Err(HttpError::new("connection refused"))
     }
 }
@@ -650,6 +653,88 @@ fn provider_streams_text_from_sse_body() {
         AssistantContent::Text(text) => assert_eq!(text.text, "你好，世界"),
         other => panic!("expected text, got {other:?}"),
     }
+}
+
+/// 分片 reader：每次只吐 8 字节，并记录总共读了多少字节。
+struct CountingReader {
+    data: Vec<u8>,
+    position: usize,
+    read_bytes: Rc<RefCell<usize>>,
+}
+
+impl Read for CountingReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let remaining = &self.data[self.position..];
+        let take = remaining.len().min(8).min(buffer.len());
+        buffer[..take].copy_from_slice(&remaining[..take]);
+        self.position += take;
+        *self.read_bytes.borrow_mut() += take;
+        Ok(take)
+    }
+}
+
+/// 返回分片 reader 的假传输层，用来观察「边收边解析」。
+#[derive(Clone)]
+struct StreamingTransport {
+    data: Vec<u8>,
+    read_bytes: Rc<RefCell<usize>>,
+}
+
+impl StreamingTransport {
+    fn new(body: &str) -> Self {
+        Self {
+            data: body.as_bytes().to_vec(),
+            read_bytes: Rc::new(RefCell::new(0)),
+        }
+    }
+
+    fn read_bytes(&self) -> usize {
+        *self.read_bytes.borrow()
+    }
+}
+
+impl HttpTransport for StreamingTransport {
+    fn post(&self, _request: &HttpRequest) -> Result<Box<dyn Read>, HttpError> {
+        Ok(Box::new(CountingReader {
+            data: self.data.clone(),
+            position: 0,
+            read_bytes: self.read_bytes.clone(),
+        }))
+    }
+}
+
+#[test]
+fn provider_reads_response_incrementally() {
+    let body = concat!(
+        "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"a\"}}]}\n\n",
+        "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"b\"}}]}\n\n",
+        "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let transport = StreamingTransport::new(body);
+    let provider = OpenAiCompletionsProvider::new(Box::new(transport.clone()), "test-key");
+    let context = Context {
+        system_prompt: None,
+        messages: vec![user_text("hi").into()],
+        tools: None,
+    };
+
+    let events = provider.stream(&model(), &context, &RequestOptions::default());
+
+    // 一直拉到出现文本增量，此时应该只读了响应体的一部分。
+    let mut saw_text = false;
+    for event in events {
+        if matches!(event, AssistantMessageEvent::TextDelta { .. }) {
+            saw_text = true;
+            break;
+        }
+    }
+
+    assert!(saw_text, "expected a text delta");
+    assert!(
+        transport.read_bytes() < body.len(),
+        "streaming should not consume the whole body before emitting a delta"
+    );
 }
 
 #[test]

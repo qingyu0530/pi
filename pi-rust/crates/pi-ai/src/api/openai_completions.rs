@@ -7,7 +7,8 @@
 //! C++ 对照：这里的 `Chat*` 结构体相当于只用来序列化的 DTO（数据传输对象），
 //! 字段名必须和线上 JSON 完全一致，否则服务端读不懂。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::io::{BufRead, BufReader, Read};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -1232,6 +1233,12 @@ impl ChatCompletionStream {
         }
     }
 
+    /// 标记流在读取过程中失败；`finish` 会据此发出 `error` 事件。 而不是 done。
+    pub fn set_error(&mut self, message: impl Into<String>) {
+        self.error_message = Some(message.into());
+        self.stop_reason = StopReason::Error;
+    }
+
     /// 收尾：为每个内容块发 end 事件，最后发 `done` 或 `error`。
     pub fn finish(&mut self) -> Vec<AssistantMessageEvent> {
         let mut events = Vec::new();
@@ -1316,6 +1323,78 @@ impl ChatCompletionStream {
             raw_stop_reason: self.raw_stop_reason.clone(),
             end_turn: None,
             timestamp: self.timestamp,
+        }
+    }
+}
+
+/// 惰性事件流：一边从 reader 读 SSE，一边产出助手消息事件。
+/// 把「读响应体 + 解析 SSE + 聚合状态机」三件事封在一起，并实现 Iterator，让调用方每 next() 一次才真正读一点
+/// 实现 `Iterator`，所以 `Provider::stream` 可以直接返回它；
+/// 调用方每 `next()` 一次，才读一行、解析一个 chunk、产出一批事件。
+/// C++ 对照：类似一个自制的流式迭代器类，把「读网络 + 解析 + 状态机」封在一起。
+pub struct ChatCompletionEventStream {
+    reader: BufReader<Box<dyn Read>>,
+    stream: ChatCompletionStream,
+    /// 已解析出来、还没发出的事件队列（一个 chunk 可能产生多个事件）。
+    pending: VecDeque<AssistantMessageEvent>,
+    /// 是否已经发出收尾事件。
+    finished: bool,
+}
+// 构造函数。建立聚合器、把 start 事件放进队列、把 reader 包成 BufReader。
+impl ChatCompletionEventStream {
+    /// 用模型和响应体 reader 创建事件流；首个事件是 `start`。
+    #[must_use]
+    pub fn new(model: Model, reader: Box<dyn Read>) -> Self {
+        let stream = ChatCompletionStream::new(model);
+        let mut pending = VecDeque::new();
+        pending.push_back(stream.start_event());
+        Self {
+            reader: BufReader::new(reader),
+            stream,
+            pending,
+            finished: false,
+        }
+    }
+
+    /// 发收尾事件（各块的 `*_end` + `done`/`error`），标记流结束。
+    fn finish_stream(&mut self) {
+        self.pending.extend(self.stream.finish());
+        self.finished = true;
+    }
+}
+// 让这个结构体成为一个迭代器——每次 next() 要么从队列弹一个事件，要么读一行新数据、解析、产生事件。
+impl Iterator for ChatCompletionEventStream {
+    type Item = AssistantMessageEvent;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            // 先发队列里已有的事件。
+            if let Some(event) = self.pending.pop_front() {
+                return Some(event);
+            }
+            if self.finished {
+                return None;
+            }
+            // 队列空了才读下一行，实现「按需读取」。
+            let mut line = String::new();
+            match self.reader.read_line(&mut line) {
+                Ok(0) => self.finish_stream(), // 读到结尾
+                Ok(_) => {
+                    let Some(payload) = parse_sse_data(line.trim_end()) else {
+                        continue;
+                    };
+                    if payload == "[DONE]" {
+                        self.finish_stream();
+                    } else if let Ok(chunk) = serde_json::from_str::<ChatCompletionChunk>(payload) {
+                        let events = self.stream.handle_chunk(&chunk);
+                        self.pending.extend(events);
+                    }
+                }
+                Err(error) => {
+                    self.stream.set_error(format!("读取响应流失败: {error}"));
+                    self.finish_stream();
+                }
+            }
         }
     }
 }
@@ -1475,24 +1554,24 @@ impl OpenAiCompletionsProvider {
         Ok(HttpRequest { url, headers, body })
     }
 
-    /// 发请求并把 SSE 响应体聚合成事件；失败时返回单个 error 事件。
-    /// 发送成功 → aggregate_sse 把响应体聚合成事件
-    /// 实际含义：把所有失败都收敛成「一个 error 事件」，
-    /// 这样上层（Agent）不用区分错误类型，统一在事件流里看到错误。
-    /// 发请求并聚合
+    /// 发请求并返回惰性事件流；失败时返回只含一个 error 事件的流。
+    ///
+    /// 成功时返回 `ChatCompletionEventStream`：它持有响应体 reader，
+    /// 调用方边拉取边解析，不必等整段响应收完。
+    /// 把所有失败都收敛成「一个 error 事件」，这样上层不用区分错误类型。
     fn run(
         &self,
         model: &Model,
         context: &Context,
         options: &RequestOptions,
-    ) -> Vec<AssistantMessageEvent> {
+    ) -> Box<dyn Iterator<Item = AssistantMessageEvent>> {
         let request = match self.build_http_request(model, context, options) {
             Ok(request) => request,
-            Err(error) => return vec![error_event(model, &error.message)],
+            Err(error) => return Box::new(std::iter::once(error_event(model, &error.message))),
         };
         match self.transport.post(&request) {
-            Ok(body) => aggregate_sse(model, &body),
-            Err(error) => vec![error_event(model, &error.message)],
+            Ok(reader) => Box::new(ChatCompletionEventStream::new(model.clone(), reader)),
+            Err(error) => Box::new(std::iter::once(error_event(model, &error.message))),
         }
     }
 }
@@ -1509,38 +1588,25 @@ impl Provider for OpenAiCompletionsProvider {
     fn get_models(&self) -> &[Model] {
         &[]
     }
-    // 接口实现，把 run 返回的 Vec 变成装箱迭代器。改动就是把 options 一路传进来。
+    // 接口实现：直接返回 run 构造的惰性事件流。
     fn stream(
         &self,
         model: &Model,
         context: &Context,
         options: &RequestOptions,
     ) -> Box<dyn Iterator<Item = AssistantMessageEvent>> {
-        Box::new(self.run(model, context, options).into_iter())
+        self.run(model, context, options)
     }
 }
 
-/// 把一段 SSE 响应体聚合成事件序列。
+/// 把一段完整的 SSE 响应体聚合成事件序列。
 ///
-/// 逐行读：以 `data:` 开头的行取出 JSON，解析成 chunk 喂给聚合器；
-/// 遇到 `[DONE]` 或读完即结束。
+/// 内部复用流式事件流：把文本包成 `Cursor` 当 reader，再收集成 `Vec`。
+/// 需要真正的增量处理时直接用 `ChatCompletionEventStream`。
 #[must_use]
 pub fn aggregate_sse(model: &Model, body: &str) -> Vec<AssistantMessageEvent> {
-    let mut stream = ChatCompletionStream::new(model.clone());
-    let mut events = vec![stream.start_event()];
-    for line in body.lines() {
-        let Some(payload) = parse_sse_data(line) else {
-            continue;
-        };
-        if payload == "[DONE]" {
-            break;
-        }
-        if let Ok(chunk) = serde_json::from_str::<ChatCompletionChunk>(payload) {
-            events.extend(stream.handle_chunk(&chunk));
-        }
-    }
-    events.extend(stream.finish());
-    events
+    let reader = Box::new(std::io::Cursor::new(body.to_owned()));
+    ChatCompletionEventStream::new(model.clone(), reader).collect()
 }
 
 /// 从 SSE 行里取出 `data:` 后面的内容；不是数据行或为空时返回 `None`。

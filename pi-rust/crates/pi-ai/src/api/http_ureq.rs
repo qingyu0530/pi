@@ -34,22 +34,21 @@ impl Default for UreqTransport {
         Self::new()
     }
 }
-// 这就是「把 HttpRequest 真正发出去、拿回文本」的地方
+// 这就是「把 HttpRequest 真正发出去、拿回流式响应体」的地方
 impl HttpTransport for UreqTransport {
-    fn post(&self, request: &HttpRequest) -> Result<String, HttpError> {
+    fn post(&self, request: &HttpRequest) -> Result<Box<dyn std::io::Read>, HttpError> {
         // 逐个加请求头。`header` 是 `self -> Self` 的建造者方法，所以要重新赋值。
         let mut builder = self.agent.post(&request.url);
         for (name, value) in &request.headers {
             builder = builder.header(name.as_str(), value.as_str());
         }
 
-        let mut response = builder
+        let response = builder
             .send(request.body.as_str())
             .map_err(|error| HttpError::new(format!("HTTP 请求失败: {error}")))?;
 
-        response
-            .body_mut()
-            .read_to_string()
-            .map_err(|error| HttpError::new(format!("读取响应体失败: {error}")))
+        // into_body() 取出响应体，into_reader() 得到拥有所有权的流式 reader，
+        // 后续每读一行才从网络取一点，实现「边收边解析」。
+        Ok(Box::new(response.into_body().into_reader()))
     }
 }

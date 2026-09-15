@@ -37,11 +37,11 @@ impl std::fmt::Display for HttpError {
     }
 }
 
-/// 能发送 HTTP 请求并拿回响应体的传输层。
+/// 能发送 HTTP 请求并拿回流式响应体的传输层。
 ///
-/// 目前返回完整响应体文本（SSE 文本），实现简单、便于测试；
-/// 真正的「边收边解析」可以在以后把返回类型换成流式 reader。
+/// 返回一个 `Read`：调用方可以一边读一边解析 SSE，不必等整段响应收完。
+/// C++ 对照：类似返回一个 `std::istream`（这里是 Rust 的 `std::io::Read` trait 对象）。
 pub trait HttpTransport {
-    /// 发送 POST 请求，返回响应体文本。
-    fn post(&self, request: &HttpRequest) -> Result<String, HttpError>;
+    /// 发送 POST 请求，返回响应体的流式 reader。
+    fn post(&self, request: &HttpRequest) -> Result<Box<dyn std::io::Read>, HttpError>;
 }
