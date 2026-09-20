@@ -143,7 +143,6 @@ fn model_with_completions_compat_round_trips() {
         "contextWindow": 128000,
         "maxTokens": 16384,
         "compat": {
-            "api": "openai-completions",
             "supportsStore": true,
             "supportsDeveloperRole": false,
             "supportsReasoningEffort": true,

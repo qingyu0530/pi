@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 use crate::compat::{
@@ -58,28 +58,68 @@ pub enum InputType {
     Image,
 }
 
-/// 模型兼容配置。
+/// 模型兼容配置。按 api 不同取四种兼容配置之一。
 ///
 /// 原版用条件类型：compat 的具体类型由 `api` 决定（types.ts 第 841-849 行）。
 /// Rust 没有条件类型，用一个枚举表达“按 api 不同取四种配置之一”，
 /// 调用方根据 api 选择对应的变体。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "api")]
+///
+/// 注意：JSON 里的 `compat` 是**扁平对象**，本身不含 `api` 字段；
+/// 具体形状由模型顶层的 `api` 决定。所以反序列化必须先拿到 `api`，
+/// 再调用 [`ModelCompat::from_api_and_value`] 派发（见 `Model` 的自定义 `Deserialize`）。
+#[derive(Clone, Debug, PartialEq)]
 pub enum ModelCompat {
-    #[serde(rename = "openai-completions")]
     OpenaiCompletions(Box<OpenAICompletionsCompat>),
-    #[serde(rename = "openai-responses")]
     OpenaiResponses(Box<OpenAIResponsesCompat>),
-    #[serde(rename = "anthropic-messages")]
     AnthropicMessages(Box<AnthropicMessagesCompat>),
-    #[serde(rename = "bedrock-converse-stream")]
     BedrockConverseStream(Box<BedrockCompat>),
+}
+
+impl ModelCompat {
+    /// 按模型 `api` 把扁平的 compat JSON 解析成对应变体。
+    ///
+    /// 未知字段会被忽略（serde 默认行为），所以原版新增字段不会导致解析失败。
+    pub fn from_api_and_value(api: &str, value: Value) -> Result<Self, String> {
+        match api {
+            "openai-completions" => serde_json::from_value(value)
+                .map(|compat| Self::OpenaiCompletions(Box::new(compat)))
+                .map_err(|error| format!("解析 openai-completions compat 失败: {error}")),
+            "openai-responses" => serde_json::from_value(value)
+                .map(|compat| Self::OpenaiResponses(Box::new(compat)))
+                .map_err(|error| format!("解析 openai-responses compat 失败: {error}")),
+            "anthropic-messages" => serde_json::from_value(value)
+                .map(|compat| Self::AnthropicMessages(Box::new(compat)))
+                .map_err(|error| format!("解析 anthropic-messages compat 失败: {error}")),
+            "bedrock-converse-stream" => serde_json::from_value(value)
+                .map(|compat| Self::BedrockConverseStream(Box::new(compat)))
+                .map_err(|error| format!("解析 bedrock compat 失败: {error}")),
+            other => Err(format!("未知 api: {other}")),
+        }
+    }
+}
+
+/// 序列化时把内部配置**扁平**写出（不包一层变体名）。
+impl Serialize for ModelCompat {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::OpenaiCompletions(compat) => compat.serialize(serializer),
+            Self::OpenaiResponses(compat) => compat.serialize(serializer),
+            Self::AnthropicMessages(compat) => compat.serialize(serializer),
+            Self::BedrockConverseStream(compat) => compat.serialize(serializer),
+        }
+    }
 }
 
 /// 统一模型系统中的模型描述。
 /// 原版：export interface Model<TApi extends Api>
 /// 原版是泛型；这里简化成非泛型，api/provider 直接用 String（与 message.rs 一致）。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// `Deserialize` 是手写的：因为 `compat` 的形状取决于顶层的 `api`，
+/// 派生宏无法表达这种「字段类型依赖另一个字段值」的关系。
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Model {
     /// 模型 id，例如 "gpt-5"。
@@ -114,6 +154,63 @@ pub struct Model {
     /// 兼容设置；按 api 选择对应类型。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compat: Option<ModelCompat>,
+}
+
+/// `Model` 的原始反序列化形态：`compat` 先收成任意 JSON，之后再按 `api` 派发。
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawModel {
+    id: String,
+    name: String,
+    api: String,
+    provider: String,
+    base_url: String,
+    reasoning: bool,
+    #[serde(default)]
+    thinking_level_map: Option<ThinkingLevelMap>,
+    input: Vec<InputType>,
+    cost: ModelCost,
+    context_window: u64,
+    max_tokens: u64,
+    #[serde(default)]
+    sampling_params: Option<HashMap<String, Value>>,
+    #[serde(default)]
+    headers: Option<HashMap<String, String>>,
+    #[serde(default)]
+    compat: Option<Value>,
+}
+
+impl<'de> Deserialize<'de> for Model {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawModel::deserialize(deserializer)?;
+        // compat 的形状由 api 决定，所以先解析出 api，再解析 compat。
+        let compat = match raw.compat {
+            Some(value) => Some(
+                ModelCompat::from_api_and_value(&raw.api, value)
+                    .map_err(serde::de::Error::custom)?,
+            ),
+            None => None,
+        };
+        Ok(Self {
+            id: raw.id,
+            name: raw.name,
+            api: raw.api,
+            provider: raw.provider,
+            base_url: raw.base_url,
+            reasoning: raw.reasoning,
+            thinking_level_map: raw.thinking_level_map,
+            input: raw.input,
+            cost: raw.cost,
+            context_window: raw.context_window,
+            max_tokens: raw.max_tokens,
+            sampling_params: raw.sampling_params,
+            headers: raw.headers,
+            compat,
+        })
+    }
 }
 
 /// 图片生成模型描述。
