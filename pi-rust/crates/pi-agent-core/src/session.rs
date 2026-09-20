@@ -95,6 +95,8 @@ pub struct Session {
     entries: Vec<Entry>,
     next_seq: u64,
     last_id: Option<String>,
+    /// 已经写入文件的条目数；`append_new` 只写它之后的新条目。
+    persisted: usize,
 }
 
 impl Session {
@@ -139,6 +141,43 @@ impl Session {
         });
         self.next_seq += 1;
         self.last_id = Some(id);
+    }
+
+    /// 最后一条记录的 id（当前分支的叶）；空会话返回 `None`。
+    #[must_use]
+    pub fn leaf_id(&self) -> Option<&str> {
+        self.last_id.as_deref()
+    }
+
+    /// 按 id 查找一条记录。
+    #[must_use]
+    pub fn entry(&self, id: &str) -> Option<&Entry> {
+        self.entries.iter().find(|entry| entry.id() == id)
+    }
+
+    /// 从指定记录处分叉：返回一个新会话，包含从开头到该记录（含）的前缀。
+    ///
+    /// 当前是线性链，所以「分叉」= 复制前缀；新会话可继续追加，形成新分支。
+    /// 返回的会话 `persisted = 0`，表示它的内容还没写到任何文件。
+    pub fn fork_from(&self, entry_id: &str) -> Result<Self, SessionError> {
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| entry.id() == entry_id)
+            .ok_or_else(|| SessionError::new(format!("找不到记录: {entry_id}")))?;
+        let entries = self.entries[..=index].to_vec();
+        let next_seq = entries
+            .iter()
+            .map(Entry::seq)
+            .max()
+            .map_or(0, |max| max + 1);
+        let last_id = entries.last().map(|entry| entry.id().to_owned());
+        Ok(Self {
+            entries,
+            next_seq,
+            last_id,
+            persisted: 0,
+        })
     }
 
     /// 提取会话里所有消息（按顺序），忽略自定义记录。
@@ -186,18 +225,44 @@ impl Session {
             .max()
             .map_or(0, |max| max + 1);
         let last_id = entries.last().map(|entry| entry.id().to_owned());
+        let persisted = entries.len();
         Ok(Self {
             entries,
             next_seq,
             last_id,
+            persisted,
         })
     }
 
-    /// 保存到文件（通过 `Environment`，测试可换成内存实现）。
-    pub fn save(&self, env: &dyn Environment, path: &str) -> Result<(), SessionError> {
+    /// 保存到文件：整文件重写（通过 `Environment`，测试可换成内存实现）。
+    ///
+    /// 用于压缩后重建、或首次写盘；正常追加用 [`Session::append_new`]。
+    pub fn save(&mut self, env: &dyn Environment, path: &str) -> Result<(), SessionError> {
         let text = self.to_jsonl()?;
         env.write_file(path, &text)
-            .map_err(|error| SessionError::new(error.message))
+            .map_err(|error| SessionError::new(error.message))?;
+        self.persisted = self.entries.len();
+        Ok(())
+    }
+
+    /// 只把尚未写入文件的条目追加到文件末尾。
+    ///
+    /// 利用 `Environment::append_file`，正常每轮对话只追加新增的几行，不重写历史。
+    pub fn append_new(&mut self, env: &dyn Environment, path: &str) -> Result<(), SessionError> {
+        if self.persisted >= self.entries.len() {
+            return Ok(());
+        }
+        let mut text = String::new();
+        for entry in &self.entries[self.persisted..] {
+            let line = serde_json::to_string(entry)
+                .map_err(|error| SessionError::new(format!("序列化记录失败: {error}")))?;
+            text.push_str(&line);
+            text.push('\n');
+        }
+        env.append_file(path, &text)
+            .map_err(|error| SessionError::new(error.message))?;
+        self.persisted = self.entries.len();
+        Ok(())
     }
 
     /// 从文件加载。

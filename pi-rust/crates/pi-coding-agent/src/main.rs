@@ -276,8 +276,9 @@ impl Cli {
         if !self.persist_session {
             return Ok(());
         }
+        // 只追加新条目，不重写整个文件。
         self.session
-            .save(&self.env, &self.session_path)
+            .append_new(&self.env, &self.session_path)
             .map_err(|error| io::Error::other(format!("保存会话失败: {}", error.message)))
     }
 

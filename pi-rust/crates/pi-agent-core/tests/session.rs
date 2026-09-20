@@ -189,3 +189,65 @@ fn session_saves_and_loads_via_environment() {
 
     assert_eq!(restored.messages(), session.messages());
 }
+
+#[test]
+fn append_new_only_adds_new_lines() {
+    let env = FakeEnv::default();
+    let mut session = Session::new();
+    session.push_message(user("a"));
+    session.append_new(&env, "s.jsonl").unwrap();
+
+    let after_first = env.read_file("s.jsonl").unwrap();
+    assert_eq!(after_first.lines().count(), 1);
+
+    session.push_message(user("b"));
+    session.append_new(&env, "s.jsonl").unwrap();
+
+    let after_second = env.read_file("s.jsonl").unwrap();
+    assert_eq!(after_second.lines().count(), 2);
+    // 第一行没有被重写，只是追加。
+    assert!(after_second.starts_with(&after_first));
+
+    let restored = Session::load(&env, "s.jsonl").unwrap();
+    assert_eq!(restored.messages().len(), 2);
+}
+
+#[test]
+fn fork_from_copies_prefix_and_can_continue() {
+    let mut session = Session::new();
+    session.push_message(user("a"));
+    session.push_message(user("b"));
+    session.push_message(user("c"));
+
+    let fork_point = session.entries()[1].id().to_owned();
+    let mut fork = session.fork_from(&fork_point).unwrap();
+
+    assert_eq!(fork.entries().len(), 2);
+    assert_eq!(fork.leaf_id(), Some(fork_point.as_str()));
+
+    // 分叉后继续追加，父指针指向分叉点。
+    fork.push_message(user("d"));
+    match fork.entries().last().unwrap() {
+        Entry::Message { parent_id, .. } => {
+            assert_eq!(parent_id.as_deref(), Some(fork_point.as_str()));
+        }
+        other => panic!("expected message entry, got {other:?}"),
+    }
+}
+
+#[test]
+fn fork_from_unknown_id_is_error() {
+    let session = Session::new();
+
+    assert!(session.fork_from("nope").is_err());
+}
+
+#[test]
+fn entry_lookup_by_id() {
+    let mut session = Session::new();
+    session.push_message(user("a"));
+
+    let id = session.leaf_id().unwrap().to_owned();
+    assert!(session.entry(&id).is_some());
+    assert!(session.entry("missing").is_none());
+}

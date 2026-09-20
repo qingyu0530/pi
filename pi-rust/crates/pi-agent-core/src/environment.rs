@@ -6,6 +6,8 @@
 //! C++ 对照：`Environment` ≈ 抽象基类；`RealEnvironment` / 测试里的假实现是子类。
 //! 这与 Provider / FauxProvider 是同一套设计（依赖注入 / 打桩）。
 
+use std::io::Write;
+
 /// 环境操作失败时的错误。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnvError {
@@ -54,6 +56,16 @@ pub trait Environment {
     /// 路径不存在、不是目录或无权访问时返回 `Err`。
     /// C++ 对照：类似用 `std::filesystem::directory_iterator` 把条目一次性收进 `vector`。
     fn read_dir(&self, path: &str) -> Result<Vec<DirEntry>, EnvError>;
+
+    /// 追加写入文件（文件不存在则创建）。
+    ///
+    /// 默认实现是「读出来 + 拼接 + 整体写回」，对内存实现足够；
+    /// 真实文件系统会覆盖成真正的追加写，避免每次重写整个文件。
+    fn append_file(&self, path: &str, content: &str) -> Result<(), EnvError> {
+        let mut existing = self.read_file(path).unwrap_or_default();
+        existing.push_str(content);
+        self.write_file(path, &existing)
+    }
 }
 
 /// 使用真实文件系统的实现。 用真实文件系统实现 trait
@@ -70,7 +82,18 @@ impl Environment for RealEnvironment {
         std::fs::write(path, content)
             .map_err(|error| EnvError::new(format!("写入文件 `{path}` 失败: {error}")))
     }
-    /// 用真实文件系统实现上面那个接口。输入一个目录路径，输出该目录下的条目列表
+    // 用操作系统的真正追加写——只写新内容，不碰已有字节
+    fn append_file(&self, path: &str, content: &str) -> Result<(), EnvError> {
+        // 以「创建 + 追加」模式打开，只写新内容，不重写整个文件。
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|error| EnvError::new(format!("打开文件 `{path}` 追加失败: {error}")))?;
+        file.write_all(content.as_bytes())
+            .map_err(|error| EnvError::new(format!("追加写入文件 `{path}` 失败: {error}")))
+    }
+
     fn read_dir(&self, path: &str) -> Result<Vec<DirEntry>, EnvError> {
         // read_dir 返回一个迭代器，每个元素是 Result<DirEntry, io::Error>。
         let entries = std::fs::read_dir(path)
