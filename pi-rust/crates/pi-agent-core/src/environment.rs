@@ -66,6 +66,13 @@ pub trait Environment {
         existing.push_str(content);
         self.write_file(path, &existing)
     }
+
+    /// 递归创建目录（已存在则什么都不做）。
+    ///
+    /// 默认实现什么都不做（内存实现不需要目录）；真实文件系统会真正创建。
+    fn create_dir_all(&self, _path: &str) -> Result<(), EnvError> {
+        Ok(())
+    }
 }
 
 /// 使用真实文件系统的实现。 用真实文件系统实现 trait
@@ -92,6 +99,11 @@ impl Environment for RealEnvironment {
             .map_err(|error| EnvError::new(format!("打开文件 `{path}` 追加失败: {error}")))?;
         file.write_all(content.as_bytes())
             .map_err(|error| EnvError::new(format!("追加写入文件 `{path}` 失败: {error}")))
+    }
+
+    fn create_dir_all(&self, path: &str) -> Result<(), EnvError> {
+        std::fs::create_dir_all(path)
+            .map_err(|error| EnvError::new(format!("创建目录 `{path}` 失败: {error}")))
     }
 
     fn read_dir(&self, path: &str) -> Result<Vec<DirEntry>, EnvError> {

@@ -1,8 +1,8 @@
 use std::io::{self, Write};
 
 use pi_agent_core::{
-    Agent, BashTool, DEFAULT_COMPACTION_SETTINGS, EditTool, FindTool, GrepTool, LsTool, ReadTool,
-    RealEnvironment, RealShell, Session, WriteTool,
+    Agent, BashTool, DEFAULT_COMPACTION_SETTINGS, EditTool, Environment, FindTool, GrepTool,
+    LsTool, ReadTool, RealEnvironment, RealShell, Session, WriteTool,
 };
 use pi_ai::{
     FauxProvider, FauxResponse, InputType, Model, ModelCost, ModelCostRates, ModelRegistry,
@@ -12,8 +12,10 @@ use pi_ai::{
 use pi_tui::{EventRenderer, PlainRenderer, Renderer};
 
 mod args;
+mod session_store;
 
 use args::{Args, ListModels, help_text, parse_args};
+use session_store::{DEFAULT_SESSION_DIR, most_recent_session, new_session_path};
 
 /// 默认的会话文件（可用 `--session` 或 `PI_SESSION` 覆盖）。
 const DEFAULT_SESSION_FILE: &str = "pi-session.jsonl";
@@ -142,12 +144,8 @@ struct Cli {
 impl Cli {
     fn new(args: &Args) -> io::Result<Self> {
         // 按参数装配整个会话：会话文件、Agent、请求选项、工具、历史回放。
-        let session_path = args
-            .session
-            .clone()
-            .or_else(|| std::env::var("PI_SESSION").ok())
-            .unwrap_or_else(|| DEFAULT_SESSION_FILE.to_owned());
         let env = RealEnvironment;
+        let session_path = resolve_session_path(args, &env)?;
         // `--no-session` 时不读盘，从空会话开始。
         let session = if args.no_session {
             Session::new()
@@ -323,6 +321,53 @@ fn parse_thinking(level: &str) -> Result<ModelThinkingLevel, String> {
             "无效的 thinking 级别: {other}（可选 off/minimal/low/medium/high/xhigh/max）"
         )),
     }
+}
+
+/// 决定本次使用的会话文件路径。
+///
+/// - `--session <path>`：直接用该文件；
+/// - `--continue` / `--resume`：会话目录里最近的一个，没有就新建；
+/// - `--session-dir <dir>`：在该目录里新建；
+/// - 其它：`PI_SESSION` 或默认单文件。
+fn resolve_session_path(args: &Args, env: &dyn Environment) -> io::Result<String> {
+    if let Some(path) = &args.session {
+        return Ok(path.clone());
+    }
+
+    let use_dir = args.continue_session || args.resume || args.session_dir.is_some();
+    if !use_dir {
+        return Ok(std::env::var("PI_SESSION").unwrap_or_else(|_| DEFAULT_SESSION_FILE.to_owned()));
+    }
+
+    let dir = args
+        .session_dir
+        .clone()
+        .or_else(|| std::env::var("PI_SESSION_DIR").ok())
+        .unwrap_or_else(|| DEFAULT_SESSION_DIR.to_owned());
+    // 确保会话目录存在（真实文件系统里才真正创建）。
+    env.create_dir_all(&dir)
+        .map_err(|error| io::Error::other(error.message))?;
+
+    if args.continue_session || args.resume {
+        if let Some(path) = most_recent_session(env, &dir) {
+            return Ok(path);
+        }
+    }
+
+    // 新建一个带时间戳的会话文件。
+    Ok(new_session_path(
+        &dir,
+        now_millis(),
+        &std::process::id().to_string(),
+    ))
+}
+
+/// 当前 Unix 毫秒时间。
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// 打印模型目录，`filter` 可带子串过滤。   

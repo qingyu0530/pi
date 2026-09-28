@@ -1,7 +1,7 @@
 //! 命令行参数解析。
 //!   
 //! 手写解析，不引入额外依赖；只覆盖当前 Rust 版本支持的能力子集。   把命令行 argv 解析成一个 Args 结构，供 main 决定用哪个模型、会话存哪、是不是非交互模式等。手写解析，不依赖第三方参数库。
-//! C++ 对照：类似自己写一个 `argv` 循环，而不是用现成的参数库。 
+//! C++ 对照：类似自己写一个 `argv` 循环，而不是用现成的参数库。
 
 /// `--list-models` 的两种形式。   表达 --list-models 的两种形态——不带搜索词、带搜索词。
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -20,6 +20,9 @@ pub struct Args {
     pub api_key: Option<String>,
     pub system_prompt: Option<String>,
     pub session: Option<String>,
+    pub session_dir: Option<String>,
+    pub continue_session: bool,
+    pub resume: bool,
     pub no_session: bool,
     pub print: bool,
     pub list_models: Option<ListModels>,
@@ -48,6 +51,8 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
             "--version" | "-v" => result.version = true,
             "--print" | "-p" => result.print = true,
             "--no-session" => result.no_session = true,
+            "--continue" | "-c" => result.continue_session = true,
+            "--resume" | "-r" => result.resume = true,
             "--list-models" => {
                 // 后面若是普通词（不以 '-' 开头）就当作搜索词。
                 let next = args.get(index + 1);
@@ -65,6 +70,9 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
                 result.system_prompt = Some(take_value(args, &mut index, "--system-prompt")?);
             }
             "--session" => result.session = Some(take_value(args, &mut index, "--session")?),
+            "--session-dir" => {
+                result.session_dir = Some(take_value(args, &mut index, "--session-dir")?);
+            }
             "--thinking" => result.thinking = Some(take_value(args, &mut index, "--thinking")?),
             other if other.starts_with('-') => return Err(format!("未知选项: {other}")),
             other => result.messages.push(other.to_owned()),
@@ -99,6 +107,9 @@ pub fn help_text() -> String {
   --system-prompt <text>   系统提示
   --thinking <level>       思考级别: off, minimal, low, medium, high, xhigh, max
   --session <path>         会话文件（默认 pi-session.jsonl，或环境变量 PI_SESSION）
+  --session-dir <dir>      会话目录（默认 pi-sessions，或环境变量 PI_SESSION_DIR）
+  --continue, -c           继续最近一次会话
+  --resume, -r             恢复最近一次会话
   --no-session             不保存会话
   --print, -p              非交互：处理消息后退出
   --list-models [search]   列出可用模型（可选子串过滤）
@@ -165,6 +176,16 @@ mod tests {
         let error = parse_args(&owned).unwrap_err();
 
         assert!(error.contains("未知选项"));
+    }
+
+    #[test]
+    fn parses_session_flags() {
+        let args = parse(&["-c", "--session-dir", "s"]);
+
+        assert!(args.continue_session);
+        assert_eq!(args.session_dir.as_deref(), Some("s"));
+
+        assert!(parse(&["-r"]).resume);
     }
 
     #[test]
