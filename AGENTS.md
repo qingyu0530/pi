@@ -1,5 +1,11 @@
 # Development Rules
 
+## Repository Layout
+
+- `pi/` —— 原版 TypeScript monorepo（npm 相关命令在 `pi/` 目录下执行；本文件中形如 `packages/...`、`scripts/...`、`CHANGELOG.md`、`test.sh` 的路径均指 `pi/` 下的同名路径）。
+- `pi-rust/` —— Rust 重写版，独立 cargo workspace，cargo 命令在该目录下执行。
+- `.github/workflows/` 保留在仓库根目录，通过 `working-directory: pi` 指向原版项目。
+
 ## Conversational Style
 
 - Keep answers short and concise
@@ -30,8 +36,8 @@
 
 - After code changes (not docs): `npm run check` (full output, no tail). Fix all errors, warnings, and infos before committing. Does not run tests.
 - Never run `npm run build` or `npm test` unless requested by the user.
-- Never run the full vitest suite directly: it includes e2e tests that activate when endpoint/auth env vars are present. For all non-e2e tests, run `./test.sh` from the repo root. Otherwise run specific tests from the package root:
-  - Vitest: `node "$(git rev-parse --show-toplevel)/node_modules/vitest/dist/cli.js" --run test/specific.test.ts`
+- Never run the full vitest suite directly: it includes e2e tests that activate when endpoint/auth env vars are present. For all non-e2e tests, run `./pi/test.sh` from the repo root (the script switches to its own directory). Otherwise run specific tests from the package root:
+  - Vitest: `node "$(git rev-parse --show-toplevel)/pi/node_modules/vitest/dist/cli.js" --run test/specific.test.ts`
   - `packages/tui` (`node:test`): `node --test test/specific.test.ts`
 - If you create or modify a test file, run it and iterate on test or implementation until it passes.
 - For `packages/coding-agent/test/suite/`, use `test/suite/harness.ts` + the faux provider. No real provider APIs, keys, or paid tokens.
@@ -100,7 +106,7 @@ Run the TUI in a controlled terminal (from the repo root):
 
 ```bash
 tmux new-session -d -s pi-test -x 80 -y 24
-tmux send-keys -t pi-test "./pi-test.sh" Enter
+tmux send-keys -t pi-test "./pi/pi-test.sh" Enter
 sleep 3 && tmux capture-pane -t pi-test -p     # capture after startup
 tmux send-keys -t pi-test "your prompt here" Enter
 tmux send-keys -t pi-test Escape               # special keys (also C-o for ctrl+o, etc.)
@@ -125,6 +131,8 @@ Attribution:
 - External contributions: `Added feature X ([#456](https://github.com/earendil-works/pi-mono/pull/456) by [@username](https://github.com/username))`
 
 ## Releasing
+
+以下 release 相关命令都在 `pi/` 目录下执行。
 
 **Lockstep versioning**: all packages share one version; every release updates all together. `patch` = fixes + additions, `minor` = breaking changes. No major releases.
 

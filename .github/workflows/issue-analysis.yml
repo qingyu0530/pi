@@ -282,7 +282,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: ${{ steps.workdir.outputs.name }}/package-lock.json
+          cache-dependency-path: ${{ steps.workdir.outputs.name }}/pi/package-lock.json
 
       - name: Install system dependencies (Linux)
         if: needs.authorize.outputs.runner_os == 'linux'
@@ -322,11 +322,11 @@ jobs:
           rg --version
 
       - name: Install dependencies
-        working-directory: ${{ steps.workdir.outputs.name }}
+        working-directory: ${{ steps.workdir.outputs.name }}/pi
         run: npm ci --ignore-scripts
 
       - name: Build
-        working-directory: ${{ steps.workdir.outputs.name }}
+        working-directory: ${{ steps.workdir.outputs.name }}/pi
         run: npm run build
 
       - name: Write auth.json
@@ -367,7 +367,7 @@ jobs:
             const path = require('path');
             const { spawn } = require('child_process');
 
-            const workdir = path.join(process.env.GITHUB_WORKSPACE, process.env.WORKDIR);
+            const workdir = path.join(process.env.GITHUB_WORKSPACE, process.env.WORKDIR, 'pi');
             const outDir = path.join(process.env.RUNNER_TEMP, 'pi-out');
             const sessionDir = path.join(outDir, 'session');
             fs.mkdirSync(sessionDir, { recursive: true });
@@ -522,7 +522,7 @@ jobs:
             const sessionHtml = path.join(outDir, 'session.html');
             fs.copyFileSync(sessionFile, sessionJsonl);
 
-            const workdir = path.join(process.env.GITHUB_WORKSPACE, process.env.WORKDIR);
+            const workdir = path.join(process.env.GITHUB_WORKSPACE, process.env.WORKDIR, 'pi');
             const exitCode = await new Promise((resolve, reject) => {
               const child = spawn(
                 'node',

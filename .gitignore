@@ -1,15 +1,11 @@
+# 仓库级忽略规则。与具体项目相关的规则放在各项目自己的 .gitignore（pi/、pi-rust/）。
+
 node_modules/
 dist/
 .artifacts/
 *.log
 .DS_Store
 *.tsbuildinfo
-# packages/*/node_modules/
-packages/*/dist/
-packages/*/dist-chrome/
-packages/*/dist-firefox/
-packages/ai/src/providers/data/
-packages/ai/src/providers/.model-generation-*/
 *.cpuprofile
 
 # Environment
@@ -28,18 +24,3 @@ packages/ai/src/providers/.model-generation-*/
 .npm/
 coverage/
 .nyc_output/
-.pi_config/
-tui-debug.log
-compaction-results/
-.opencode/
-syntax.jsonl
-out.jsonl
-pi-*.html
-out.html
-packages/coding-agent/binaries/
-todo.md
-plans/
-.pi/hf-sessions/
-.pi/hf-sessions-backup/
-.pi/agent/
-collect.sh

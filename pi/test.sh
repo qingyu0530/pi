@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 允许从仓库根或任意目录调用：切到脚本所在目录（原版 pi 项目根）。
+cd "$(dirname "$0")"
+
 # Isolate user resources, credentials, temporary files, and tool configuration.
 temp_parent="${TMPDIR:-/tmp}"
 temp_parent="${temp_parent%/}"

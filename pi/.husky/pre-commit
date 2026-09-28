@@ -1,16 +1,19 @@
 #!/bin/sh
 
+# Git 钩子在仓库根目录执行；原版 pi 项目位于 pi/ 子目录，检查在该目录下运行。
+PI_DIR="pi"
+
 # Get list of staged files before running check
 STAGED_FILES=$(git diff --cached --name-only)
 
-node scripts/check-lockfile-commit.mjs
+node "$PI_DIR/scripts/check-lockfile-commit.mjs"
 if [ $? -ne 0 ]; then
   exit 1
 fi
 
 # Run the check script (formatting, linting, and type checking)
 echo "Running formatting, linting, and type checking..."
-npm run check
+(cd "$PI_DIR" && npm run check)
 if [ $? -ne 0 ]; then
   echo "❌ Checks failed. Please fix the errors before committing."
   exit 1
@@ -19,7 +22,7 @@ fi
 RUN_BROWSER_SMOKE=0
 for file in $STAGED_FILES; do
   case "$file" in
-    packages/ai/*|packages/web-ui/*|package.json|package-lock.json)
+    pi/packages/ai/*|pi/packages/web-ui/*|pi/package.json|pi/package-lock.json)
       RUN_BROWSER_SMOKE=1
       break
       ;;
@@ -28,7 +31,7 @@ done
 
 if [ $RUN_BROWSER_SMOKE -eq 1 ]; then
   echo "Running browser smoke check..."
-  npm run check:browser-smoke
+  (cd "$PI_DIR" && npm run check:browser-smoke)
   if [ $? -ne 0 ]; then
     echo "❌ Browser smoke check failed."
     exit 1

@@ -67,7 +67,7 @@ cd "$repo_root"
 
 commit="$(git rev-parse --verify --end-of-options "${source_ref}^{commit}")"
 
-package_version="$(git show "${commit}:packages/coding-agent/package.json" | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).version')"
+package_version="$(git show "${commit}:pi/packages/coding-agent/package.json" | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).version')"
 if [[ "$package_version" != "$version" ]]; then
     echo "Version ${version} does not match package version ${package_version} at ${source_ref}" >&2
     exit 1
@@ -114,15 +114,15 @@ git archive --format=tar --prefix="${archive_root}/" --mtime="@${archive_mtime}"
 tar -tzf "$temporary_archive" > "$manifest"
 
 required_paths=(
-    "package.json"
-    "package-lock.json"
-    "scripts/build-binaries.sh"
-    "packages/ai/src/models.generated.ts"
-    "packages/ai/src/image-models.generated.ts"
-    "packages/ai/src/providers/data/.manifest.json"
-    "packages/coding-agent/package.json"
-    "packages/coding-agent/src/utils/image-resize-worker.ts"
-    "packages/coding-agent/src/core/export-html/template.css"
+    "pi/package.json"
+    "pi/package-lock.json"
+    "pi/scripts/build-binaries.sh"
+    "pi/packages/ai/src/models.generated.ts"
+    "pi/packages/ai/src/image-models.generated.ts"
+    "pi/packages/ai/src/providers/data/.manifest.json"
+    "pi/packages/coding-agent/package.json"
+    "pi/packages/coding-agent/src/utils/image-resize-worker.ts"
+    "pi/packages/coding-agent/src/core/export-html/template.css"
 )
 
 for path in "${required_paths[@]}"; do
@@ -143,7 +143,7 @@ if grep -Eq '(^|/)node_modules/|(^|/)packages/coding-agent/binaries/' "$manifest
 fi
 
 tar -xzf "$temporary_archive" -C "$validation_root"
-node "${validation_root}/${archive_root}/packages/ai/scripts/check-model-data.ts"
+node "${validation_root}/${archive_root}/pi/packages/ai/scripts/check-model-data.ts"
 
 mv "$temporary_archive" "$output"
 trap 'rm -f "$temporary_index" "$manifest"; rm -rf "$validation_root"' EXIT

@@ -31,8 +31,8 @@ function packageLabel(lockPath, entry) {
 }
 
 function getLockfilePackageChanges() {
-	const before = readJsonFromGit("HEAD:package-lock.json");
-	const after = readJsonFromGit(":package-lock.json");
+	const before = readJsonFromGit("HEAD:pi/package-lock.json");
+	const after = readJsonFromGit(":pi/package-lock.json");
 	if (!before?.packages || !after?.packages) return undefined;
 
 	const changes = [];

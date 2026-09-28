@@ -31,6 +31,10 @@ jobs:
     env:
       RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
       SOURCE_REF: ${{ github.event.inputs.source_ref || github.event.inputs.tag || github.ref_name }}
+    # 原版 pi 项目位于 pi/ 子目录，所有 run 步骤都在该目录下执行。
+    defaults:
+      run:
+        working-directory: pi
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -71,9 +75,9 @@ jobs:
           build_root="$(mktemp -d)"
           trap 'rm -rf "${build_root}"' EXIT
           tar -xzf "release-assets/pi-${VERSION}-source.tar.gz" -C "${build_root}"
-          "${build_root}/pi-${VERSION}/scripts/build-binaries.sh" \
+          "${build_root}/pi-${VERSION}/pi/scripts/build-binaries.sh" \
             --offline-model-data \
-            --out "${GITHUB_WORKSPACE}/packages/coding-agent/binaries"
+            --out "${GITHUB_WORKSPACE}/pi/packages/coding-agent/binaries"
 
       - name: Prepare GitHub release payload
         run: |
@@ -103,9 +107,9 @@ jobs:
             test -f "${asset}"
           done
 
-          cp "${binary_assets[@]}" "${GITHUB_WORKSPACE}/release-assets/"
+          cp "${binary_assets[@]}" "${GITHUB_WORKSPACE}/pi/release-assets/"
 
-          cd "${GITHUB_WORKSPACE}/release-assets"
+          cd "${GITHUB_WORKSPACE}/pi/release-assets"
           source_asset="pi-${VERSION}-source.tar.gz"
           release_assets=(
             "${source_asset}"
@@ -124,7 +128,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-assets-${{ env.RELEASE_TAG }}
-          path: release-assets/*
+          path: pi/release-assets/*
           if-no-files-found: error
           retention-days: 14
 
@@ -303,6 +307,10 @@ jobs:
     env:
       RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
       SOURCE_REF: ${{ github.event.inputs.source_ref || github.event.inputs.tag || github.ref_name }}
+    # 原版 pi 项目位于 pi/ 子目录，所有 run 步骤都在该目录下执行。
+    defaults:
+      run:
+        working-directory: pi
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -316,6 +324,7 @@ jobs:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
           cache: npm
+          cache-dependency-path: pi/package-lock.json
 
       - name: Install system dependencies
         run: |
@@ -360,6 +369,10 @@ jobs:
       AWS_DEFAULT_REGION: auto
       AWS_EC2_METADATA_DISABLED: 'true'
       R2_ENDPOINT: https://67c0d357268b0fca6e0b465bb9d01b84.r2.cloudflarestorage.com
+    # 原版 pi 项目位于 pi/ 子目录，所有 run 步骤都在该目录下执行。
+    defaults:
+      run:
+        working-directory: pi
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

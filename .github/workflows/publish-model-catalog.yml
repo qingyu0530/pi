@@ -10,9 +10,9 @@ on:
     paths:
       - '.github/workflows/publish-model-catalog.yml'
       - '.gitignore'
-      - 'package.json'
-      - 'packages/ai/**'
-      - 'scripts/publish-model-catalog.mjs'
+      - 'pi/package.json'
+      - 'pi/packages/ai/**'
+      - 'pi/scripts/publish-model-catalog.mjs'
   # GitHub schedules use UTC. Run hourly candidates across the CET/CEST
   # boundaries; the publish job only uploads at 10:17, 12:17, and 14:17
   # Europe/Vienna time.
@@ -40,6 +40,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       SOURCE_REF: ${{ github.event.workflow_run.head_sha || inputs.source_ref || github.sha }}
+    # 原版 pi 项目位于 pi/ 子目录，所有 run 步骤都在该目录下执行。
+    defaults:
+      run:
+        working-directory: pi
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -52,6 +56,7 @@ jobs:
         with:
           node-version: '22'
           cache: npm
+          cache-dependency-path: pi/package-lock.json
 
       - name: Install dependencies
         run: npm ci --ignore-scripts
@@ -66,7 +71,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: model-catalog-json
-          path: .artifacts/model-catalog
+          path: pi/.artifacts/model-catalog
           if-no-files-found: error
           retention-days: 14
 
@@ -85,6 +90,10 @@ jobs:
       AWS_DEFAULT_REGION: auto
       AWS_EC2_METADATA_DISABLED: 'true'
       R2_ENDPOINT: https://67c0d357268b0fca6e0b465bb9d01b84.r2.cloudflarestorage.com
+    # 原版 pi 项目位于 pi/ 子目录，所有 run 步骤都在该目录下执行。
+    defaults:
+      run:
+        working-directory: pi
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -101,7 +110,7 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: model-catalog-json
-          path: .artifacts/model-catalog
+          path: pi/.artifacts/model-catalog
 
       - name: Verify AWS CLI
         run: aws --version

@@ -2,7 +2,8 @@
 
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 function printUsage() {
@@ -53,7 +54,7 @@ if (requestedProviders.some((arg) => arg.startsWith("-"))) {
 	process.exit(1);
 }
 
-const repoRoot = run("git", ["rev-parse", "--show-toplevel"], { capture: true }).trim();
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const temporaryRoot = mkdtempSync(join(tmpdir(), "pi-model-catalog-diff-"));
 const baselineWorktree = join(temporaryRoot, "baseline-worktree");
 const baselineOutput = join(temporaryRoot, "before");
