@@ -93,4 +93,36 @@ fn builtin_catalog_parses_with_default_models() {
     // 新增的 zai/glm-4.6。
     let glm = registry.get("zai", "glm-4.6").expect("glm-4.6 exists");
     assert_eq!(glm.max_tokens, 131_072);
+
+    // anthropic 两个 adaptive-thinking 模型带 xhigh/max 精确映射；
+    // haiku 走预算模式，不配表。
+    let map_of = |id: &str| {
+        registry
+            .get("anthropic", id)
+            .unwrap()
+            .thinking_level_map
+            .as_ref()
+            .expect("thinkingLevelMap")
+    };
+    let sonnet = map_of("claude-sonnet-5");
+    assert_eq!(
+        sonnet.get(&ModelThinkingLevel::Xhigh),
+        Some(&Some("xhigh".to_owned()))
+    );
+    assert_eq!(
+        sonnet.get(&ModelThinkingLevel::Max),
+        Some(&Some("max".to_owned()))
+    );
+    let opus = map_of("claude-opus-4-8");
+    assert_eq!(
+        opus.get(&ModelThinkingLevel::Xhigh),
+        Some(&Some("xhigh".to_owned()))
+    );
+    assert!(
+        registry
+            .get("anthropic", "claude-haiku-4-5")
+            .unwrap()
+            .thinking_level_map
+            .is_none()
+    );
 }

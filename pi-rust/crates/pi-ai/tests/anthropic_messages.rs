@@ -601,6 +601,57 @@ fn adaptive_thinking_sends_effort() {
 }
 
 #[test]
+fn thinking_level_map_maps_xhigh_and_max_natively() {
+    let mut model = with_compat(
+        reasoning_model(),
+        AnthropicMessagesCompat {
+            force_adaptive_thinking: Some(true),
+            ..AnthropicMessagesCompat::default()
+        },
+    );
+    // 模拟 claude-sonnet-5 / claude-opus-4-8 的内置数据：只配 xhigh/max。
+    model.thinking_level_map = Some(
+        [
+            (ModelThinkingLevel::Xhigh, Some("xhigh".to_owned())),
+            (ModelThinkingLevel::Max, Some("max".to_owned())),
+        ]
+        .into_iter()
+        .collect(),
+    );
+
+    let build = |level| {
+        serde_json::to_value(build_request(
+            &model,
+            &context(None, vec![user_text("hi").into()]),
+            &RequestOptions {
+                reasoning_effort: Some(level),
+                ..RequestOptions::default()
+            },
+        ))
+        .unwrap()
+    };
+
+    // 查表命中：发原生 effort，而不是归并到 "high"。
+    assert_eq!(
+        build(ModelThinkingLevel::Xhigh)["output_config"]["effort"],
+        "xhigh"
+    );
+    assert_eq!(
+        build(ModelThinkingLevel::Max)["output_config"]["effort"],
+        "max"
+    );
+    // 表里没有的级别仍走分档默认值。
+    assert_eq!(
+        build(ModelThinkingLevel::High)["output_config"]["effort"],
+        "high"
+    );
+    assert_eq!(
+        build(ModelThinkingLevel::Medium)["output_config"]["effort"],
+        "medium"
+    );
+}
+
+#[test]
 fn off_level_marked_unsupported_omits_thinking() {
     let mut model = reasoning_model();
     model.thinking_level_map = Some([(ModelThinkingLevel::Off, None)].into_iter().collect());
