@@ -290,7 +290,7 @@ pub struct OpenAIResponsesCompat {
 
 /// Anthropic Messages API 的兼容设置。
 /// 原版：export interface AnthropicMessagesCompat
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnthropicMessagesCompat {
     #[serde(skip_serializing_if = "Option::is_none")]

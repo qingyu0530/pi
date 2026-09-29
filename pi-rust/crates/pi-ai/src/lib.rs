@@ -24,10 +24,10 @@ mod models;
 mod provider;
 
 pub use compat::{
-    AnthropicAllowedFallbackModel, BedrockCompat, CacheControlFormat, ChatTemplateKwargValue,
-    ChatTemplateVar, DataCollection, DeferredToolsMode, Latency, MaxPrice, MaxTokensField,
-    OpenAICompletionsCompat, OpenAIResponsesCompat, OpenRouterRouting, Percentiles, PriceValue,
-    SessionAffinityFormat, Sort, ThinkingFormat, ThinkingTokenBudgetField, Throughput,
+    AnthropicAllowedFallbackModel, AnthropicMessagesCompat, BedrockCompat, CacheControlFormat,
+    ChatTemplateKwargValue, ChatTemplateVar, DataCollection, DeferredToolsMode, Latency, MaxPrice,
+    MaxTokensField, OpenAICompletionsCompat, OpenAIResponsesCompat, OpenRouterRouting, Percentiles,
+    PriceValue, SessionAffinityFormat, Sort, ThinkingFormat, ThinkingTokenBudgetField, Throughput,
     VercelGatewayRouting,
 };
 pub use content::{
@@ -53,6 +53,9 @@ pub use models::{ModelRegistry, RegistryError};
 pub use provider::{CacheRetention, FauxProvider, FauxResponse, Provider, RequestOptions};
 
 // API 协议层与真实传输
+pub use api::anthropic_messages::{
+    AnthropicMessagesProvider, ResolvedAnthropicCompat, resolve_anthropic_compat,
+};
 pub use api::http::{HttpError, HttpRequest, HttpTransport};
 pub use api::http_ureq::UreqTransport;
 pub use api::openai_compat::{
