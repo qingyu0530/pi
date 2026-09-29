@@ -21,6 +21,7 @@ pub fn list_sessions(env: &dyn Environment, dir: &str) -> Result<Vec<String>, St
 }
 
 /// 目录里最近的会话文件；目录不存在或没有会话时返回 `None`。
+/// 返回目录里名字最大的那个会话文件路径；没有会话或目录不存在时返回 None。
 pub fn most_recent_session(env: &dyn Environment, dir: &str) -> Option<String> {
     // 目录不存在等价于「还没有任何会话」，算 None，不当错误。
     list_sessions(env, dir)
