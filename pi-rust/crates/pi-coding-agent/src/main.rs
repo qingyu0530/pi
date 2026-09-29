@@ -5,9 +5,9 @@ use pi_agent_core::{
     LsTool, ReadTool, RealEnvironment, RealShell, Session, WriteTool,
 };
 use pi_ai::{
-    FauxProvider, FauxResponse, InputType, Model, ModelCost, ModelCostRates, ModelRegistry,
-    ModelThinkingLevel, OpenAiCompletionsProvider, RequestOptions, StopReason, UreqTransport,
-    UserMessage, UserMessageContent, UserRole,
+    AnthropicMessagesProvider, FauxProvider, FauxResponse, InputType, Model, ModelCost,
+    ModelCostRates, ModelRegistry, ModelThinkingLevel, OpenAiCompletionsProvider, Provider,
+    RequestOptions, StopReason, UreqTransport, UserMessage, UserMessageContent, UserRole,
 };
 use pi_tui::{EventRenderer, PlainRenderer, Renderer};
 
@@ -84,7 +84,10 @@ fn register_tools(agent: &mut Agent) {
 ///
 /// 优先级：命令行参数 > 环境变量 > 默认值。
 /// - `--provider` / `PI_PROVIDER`、`--model` / `PI_MODEL` 选择模型（默认 openai/gpt-4o-mini）。
-/// - `--api-key` / `OPENAI_API_KEY` 提供密钥；没有则回退 Faux 演示。
+/// - `--api-key`，或按模型 api 对应的环境变量提供密钥：
+///   `openai-completions` 用 `OPENAI_API_KEY`，`anthropic-messages` 用 `ANTHROPIC_API_KEY`。
+///
+/// 没有密钥、模型不存在、或 api 暂不支持时，回退 FauxProvider 演示。
 ///
 /// 决定用真实 Provider 还是 Faux，并选出模型。
 fn build_agent(args: &Args) -> (Agent, String) {
@@ -100,30 +103,45 @@ fn build_agent(args: &Args) -> (Agent, String) {
         .or_else(|| std::env::var("PI_MODEL").ok())
         .unwrap_or_else(|| "gpt-4o-mini".to_owned());
 
-    let api_key = args
-        .api_key
-        .clone()
-        .or_else(|| std::env::var("OPENAI_API_KEY").ok());
-
-    let Some(api_key) = api_key else {
-        eprintln!("未提供 API Key（--api-key 或 OPENAI_API_KEY），使用 FauxProvider 演示。");
-        return faux_agent(true);
-    };
-
     let Some(model) = registry.get(&provider_name, &model_id).cloned() else {
         eprintln!("模型目录中没有 {provider_name}/{model_id}，使用 FauxProvider 演示。");
         eprintln!("可用 provider: {}", registry.providers().join(", "));
         return faux_agent(false);
     };
 
-    if model.api != "openai-completions" {
-        eprintln!("暂不支持的 api: {}，使用 FauxProvider 演示。", model.api);
-        return faux_agent(false);
-    }
+    // api 决定从哪个环境变量取密钥；不支持的 api 在这里就退出，
+    // 而不是把请求发出去之后才失败。
+    let key_env = match model.api.as_str() {
+        "openai-completions" => "OPENAI_API_KEY",
+        "anthropic-messages" => "ANTHROPIC_API_KEY",
+        other => {
+            eprintln!("暂不支持的 api: {other}，使用 FauxProvider 演示。");
+            return faux_agent(false);
+        }
+    };
 
-    let provider = OpenAiCompletionsProvider::new(Box::new(UreqTransport::new()), api_key);
+    let api_key = args.api_key.clone().or_else(|| std::env::var(key_env).ok());
+
+    let Some(api_key) = api_key else {
+        eprintln!("未提供 API Key（--api-key 或 {key_env}），使用 FauxProvider 演示。");
+        return faux_agent(true);
+    };
+
+    // 同一个 Box<dyn Provider> 里装不同的协议实现：调用方（Agent）不需要知道区别。  Provider 分派
+    let provider: Box<dyn Provider> = if model.api == "anthropic-messages" {
+        Box::new(AnthropicMessagesProvider::new(
+            Box::new(UreqTransport::new()),
+            api_key,
+        ))
+    } else {
+        Box::new(OpenAiCompletionsProvider::new(
+            Box::new(UreqTransport::new()),
+            api_key,
+        ))
+    };
+
     (
-        Agent::new(Box::new(provider), model),
+        Agent::new(provider, model),
         format!("{provider_name}/{model_id}"),
     )
 }
