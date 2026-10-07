@@ -20,6 +20,8 @@ mod compat;
 mod model;
 // 模型注册表（从数据加载）
 mod models;
+// 内嵌的原版 provider 数据（自动生成）
+mod models_data;
 // Provider 抽象
 mod provider;
 

@@ -8,9 +8,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use crate::model::Model;
-
-/// 内置模型目录（编译期内嵌，运行时无需读文件）。
-const BUILTIN_MODELS: &str = include_str!("../data/models.json");
+use crate::models_data::PROVIDER_DATA;
 
 /// 原始目录数据：api -> (model id -> Model)。
 type RawCatalog = HashMap<String, HashMap<String, Model>>;
@@ -36,23 +34,31 @@ pub struct ModelRegistry {
 impl ModelRegistry {
     /// 从 JSON 文本加载；按 (provider, id) 排序，保证顺序稳定。
     pub fn from_json(text: &str) -> Result<Self, RegistryError> {
-        let raw: RawCatalog = serde_json::from_str(text).map_err(|error| RegistryError {
-            message: format!("解析模型目录失败: {error}"),
-        })?;
-        let mut models: Vec<Model> = raw
-            .into_values()
-            .flat_map(|by_id| by_id.into_values())
-            .collect();
+        Self::from_json_many(&[("models.json", text)])
+    }
+
+    /// 从多份 JSON 文本加载并合并。
+    ///
+    /// 每份形状都是 `{ api: { modelId: Model } }`（对应原版一个 provider 的数据文件）。
+    /// 文件名只用于错误信息；模型按 `(provider, id)` 排序。
+    pub fn from_json_many(data: &[(&str, &str)]) -> Result<Self, RegistryError> {
+        let mut models = Vec::new();
+        for (name, text) in data {
+            let raw: RawCatalog = serde_json::from_str(text).map_err(|error| RegistryError {
+                message: format!("解析 {name} 失败: {error}"),
+            })?;
+            models.extend(raw.into_values().flat_map(|by_id| by_id.into_values()));
+        }
         models.sort_by(|a, b| (&a.provider, &a.id).cmp(&(&b.provider, &b.id)));
         Ok(Self { models })
     }
 
-    /// 内置目录。
+    /// 内置目录（内嵌全部原版 provider 数据）。
     ///
     /// 数据是编译期内嵌的，解析失败属于开发错误，所以这里直接 panic（由测试覆盖）。
     #[must_use]
     pub fn builtin() -> Self {
-        Self::from_json(BUILTIN_MODELS).expect("内置 models.json 必须有效")
+        Self::from_json_many(PROVIDER_DATA).expect("内置 provider 数据必须有效")
     }
 
     /// 按 (provider, id) 查找模型。

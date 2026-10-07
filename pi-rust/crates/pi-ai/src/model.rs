@@ -78,22 +78,23 @@ pub enum ModelCompat {
 impl ModelCompat {
     /// 按模型 `api` 把扁平的 compat JSON 解析成对应变体。
     ///
-    /// 未知字段会被忽略（serde 默认行为），所以原版新增字段不会导致解析失败。
-    pub fn from_api_and_value(api: &str, value: Value) -> Result<Self, String> {
+    /// 未知字段会被忽略（serde 默认行为）。未知 `api` 返回 `Ok(None)`：
+    /// 即忽略这份 compat，这样加载原版完整目录时不会被尚未实现的 api 卡住。
+    pub fn from_api_and_value(api: &str, value: Value) -> Result<Option<Self>, String> {
         match api {
             "openai-completions" => serde_json::from_value(value)
-                .map(|compat| Self::OpenaiCompletions(Box::new(compat)))
+                .map(|compat| Some(Self::OpenaiCompletions(Box::new(compat))))
                 .map_err(|error| format!("解析 openai-completions compat 失败: {error}")),
             "openai-responses" => serde_json::from_value(value)
-                .map(|compat| Self::OpenaiResponses(Box::new(compat)))
+                .map(|compat| Some(Self::OpenaiResponses(Box::new(compat))))
                 .map_err(|error| format!("解析 openai-responses compat 失败: {error}")),
             "anthropic-messages" => serde_json::from_value(value)
-                .map(|compat| Self::AnthropicMessages(Box::new(compat)))
+                .map(|compat| Some(Self::AnthropicMessages(Box::new(compat))))
                 .map_err(|error| format!("解析 anthropic-messages compat 失败: {error}")),
             "bedrock-converse-stream" => serde_json::from_value(value)
-                .map(|compat| Self::BedrockConverseStream(Box::new(compat)))
+                .map(|compat| Some(Self::BedrockConverseStream(Box::new(compat))))
                 .map_err(|error| format!("解析 bedrock compat 失败: {error}")),
-            other => Err(format!("未知 api: {other}")),
+            _ => Ok(None),
         }
     }
 }
@@ -188,10 +189,8 @@ impl<'de> Deserialize<'de> for Model {
         let raw = RawModel::deserialize(deserializer)?;
         // compat 的形状由 api 决定，所以先解析出 api，再解析 compat。
         let compat = match raw.compat {
-            Some(value) => Some(
-                ModelCompat::from_api_and_value(&raw.api, value)
-                    .map_err(serde::de::Error::custom)?,
-            ),
+            Some(value) => ModelCompat::from_api_and_value(&raw.api, value)
+                .map_err(serde::de::Error::custom)?,
             None => None,
         };
         Ok(Self {

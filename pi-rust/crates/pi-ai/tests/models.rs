@@ -74,55 +74,59 @@ fn parses_flat_compat_and_thinking_level_map() {
 }
 
 #[test]
-fn builtin_catalog_parses_with_default_models() {
+fn from_json_many_merges_files() {
+    const A: &str = r#"{ "openai-completions": { "a": { "id": "a", "name": "A", "api": "openai-completions", "provider": "p1", "baseUrl": "https://x", "reasoning": false, "input": ["text"], "cost": { "input": 1, "output": 2, "cacheRead": 0, "cacheWrite": 0 }, "contextWindow": 1, "maxTokens": 1 } } }"#;
+    const B: &str = r#"{ "anthropic-messages": { "b": { "id": "b", "name": "B", "api": "anthropic-messages", "provider": "p2", "baseUrl": "https://y", "reasoning": true, "input": ["text"], "cost": { "input": 1, "output": 2, "cacheRead": 0, "cacheWrite": 0 }, "contextWindow": 1, "maxTokens": 1 } } }"#;
+
+    let registry = ModelRegistry::from_json_many(&[("a.json", A), ("b.json", B)]).unwrap();
+
+    assert_eq!(registry.models().len(), 2);
+    assert_eq!(registry.providers(), vec!["p1", "p2"]);
+}
+
+#[test]
+fn builtin_catalog_parses_full_provider_data() {
     let registry = ModelRegistry::builtin();
 
-    assert!(registry.get("openai", "gpt-4o-mini").is_some());
-    assert!(registry.get("deepseek", "deepseek-reasoner").is_some());
-    assert!(registry.providers().contains(&"openai"));
-    assert!(registry.providers().contains(&"deepseek"));
+    // 原版完整目录：几十个 provider、上千个模型。
+    assert!(registry.models().len() > 1_000);
+    for provider in ["openai", "anthropic", "deepseek", "openrouter", "zai"] {
+        assert!(registry.providers().contains(&provider));
+    }
 
-    // 内置数据里 deepseek-reasoner 带 thinkingLevelMap 和扁平 compat。
-    let reasoner = registry.get("deepseek", "deepseek-reasoner").unwrap();
-    assert!(reasoner.thinking_level_map.is_some());
+    // openai 的模型走 openai-responses。
+    let gpt = registry
+        .get("openai", "gpt-4o-mini")
+        .expect("gpt-4o-mini exists");
+    assert_eq!(gpt.api, "openai-responses");
+
+    // anthropic 走 anthropic-messages，带扁平 compat 和 thinkingLevelMap。
+    let sonnet = registry
+        .get("anthropic", "claude-sonnet-5")
+        .expect("claude-sonnet-5 exists");
+    assert_eq!(sonnet.api, "anthropic-messages");
+    assert!(sonnet.reasoning);
     assert!(matches!(
-        reasoner.compat,
+        sonnet.compat,
+        Some(ModelCompat::AnthropicMessages(_))
+    ));
+    assert!(sonnet.thinking_level_map.is_some());
+
+    // openai-completions 的 provider（deepseek）。
+    let deepseek = registry
+        .get("deepseek", "deepseek-v4-flash")
+        .expect("deepseek-v4-flash exists");
+    assert_eq!(deepseek.api, "openai-completions");
+    assert!(matches!(
+        deepseek.compat,
         Some(ModelCompat::OpenaiCompletions(_))
     ));
 
-    // 新增的 zai/glm-4.6。
-    let glm = registry.get("zai", "glm-4.6").expect("glm-4.6 exists");
-    assert_eq!(glm.max_tokens, 131_072);
-
-    // anthropic 两个 adaptive-thinking 模型带 xhigh/max 精确映射；
-    // haiku 走预算模式，不配表。
-    let map_of = |id: &str| {
-        registry
-            .get("anthropic", id)
-            .unwrap()
-            .thinking_level_map
-            .as_ref()
-            .expect("thinkingLevelMap")
-    };
-    let sonnet = map_of("claude-sonnet-5");
-    assert_eq!(
-        sonnet.get(&ModelThinkingLevel::Xhigh),
-        Some(&Some("xhigh".to_owned()))
-    );
-    assert_eq!(
-        sonnet.get(&ModelThinkingLevel::Max),
-        Some(&Some("max".to_owned()))
-    );
-    let opus = map_of("claude-opus-4-8");
-    assert_eq!(
-        opus.get(&ModelThinkingLevel::Xhigh),
-        Some(&Some("xhigh".to_owned()))
-    );
-    assert!(
-        registry
-            .get("anthropic", "claude-haiku-4-5")
-            .unwrap()
-            .thinking_level_map
-            .is_none()
-    );
+    // 未实现的 api（例如 google-generative-ai）也会被加载，
+    // 其 compat 被忽略而不是解析失败。
+    let google = registry
+        .models()
+        .iter()
+        .find(|model| model.api == "google-generative-ai");
+    assert!(google.is_some());
 }

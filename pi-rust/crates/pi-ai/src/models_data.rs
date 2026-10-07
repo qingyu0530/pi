@@ -1,0 +1,143 @@
+//! 编译期内嵌的原版 provider 数据文件（`data/providers/*.json`）。
+//!
+//! 每个文件形状为 `{ api: { modelId: Model } }`。
+//! 文件名只用于解析失败时的错误信息。
+
+/// (文件名, 文件内容) 列表。
+pub const PROVIDER_DATA: &[(&str, &str)] = &[
+    (
+        "amazon-bedrock.json",
+        include_str!("../data/providers/amazon-bedrock.json"),
+    ),
+    (
+        "anthropic.json",
+        include_str!("../data/providers/anthropic.json"),
+    ),
+    (
+        "ant-ling.json",
+        include_str!("../data/providers/ant-ling.json"),
+    ),
+    (
+        "azure-openai-responses.json",
+        include_str!("../data/providers/azure-openai-responses.json"),
+    ),
+    (
+        "baseten.json",
+        include_str!("../data/providers/baseten.json"),
+    ),
+    (
+        "cerebras.json",
+        include_str!("../data/providers/cerebras.json"),
+    ),
+    (
+        "cloudflare-ai-gateway.json",
+        include_str!("../data/providers/cloudflare-ai-gateway.json"),
+    ),
+    (
+        "cloudflare-workers-ai.json",
+        include_str!("../data/providers/cloudflare-workers-ai.json"),
+    ),
+    (
+        "deepseek.json",
+        include_str!("../data/providers/deepseek.json"),
+    ),
+    (
+        "fireworks.json",
+        include_str!("../data/providers/fireworks.json"),
+    ),
+    (
+        "github-copilot.json",
+        include_str!("../data/providers/github-copilot.json"),
+    ),
+    ("google.json", include_str!("../data/providers/google.json")),
+    (
+        "google-vertex.json",
+        include_str!("../data/providers/google-vertex.json"),
+    ),
+    ("groq.json", include_str!("../data/providers/groq.json")),
+    (
+        "huggingface.json",
+        include_str!("../data/providers/huggingface.json"),
+    ),
+    (
+        "kimi-coding.json",
+        include_str!("../data/providers/kimi-coding.json"),
+    ),
+    (
+        "minimax.json",
+        include_str!("../data/providers/minimax.json"),
+    ),
+    (
+        "minimax-cn.json",
+        include_str!("../data/providers/minimax-cn.json"),
+    ),
+    (
+        "mistral.json",
+        include_str!("../data/providers/mistral.json"),
+    ),
+    (
+        "moonshotai.json",
+        include_str!("../data/providers/moonshotai.json"),
+    ),
+    (
+        "moonshotai-cn.json",
+        include_str!("../data/providers/moonshotai-cn.json"),
+    ),
+    ("nvidia.json", include_str!("../data/providers/nvidia.json")),
+    ("openai.json", include_str!("../data/providers/openai.json")),
+    (
+        "openai-codex.json",
+        include_str!("../data/providers/openai-codex.json"),
+    ),
+    (
+        "opencode.json",
+        include_str!("../data/providers/opencode.json"),
+    ),
+    (
+        "opencode-go.json",
+        include_str!("../data/providers/opencode-go.json"),
+    ),
+    (
+        "openrouter.json",
+        include_str!("../data/providers/openrouter.json"),
+    ),
+    (
+        "qwen-token-plan.json",
+        include_str!("../data/providers/qwen-token-plan.json"),
+    ),
+    (
+        "qwen-token-plan-cn.json",
+        include_str!("../data/providers/qwen-token-plan-cn.json"),
+    ),
+    (
+        "qwen-token-plan-individual.json",
+        include_str!("../data/providers/qwen-token-plan-individual.json"),
+    ),
+    (
+        "together.json",
+        include_str!("../data/providers/together.json"),
+    ),
+    (
+        "vercel-ai-gateway.json",
+        include_str!("../data/providers/vercel-ai-gateway.json"),
+    ),
+    ("xai.json", include_str!("../data/providers/xai.json")),
+    ("xiaomi.json", include_str!("../data/providers/xiaomi.json")),
+    (
+        "xiaomi-token-plan-ams.json",
+        include_str!("../data/providers/xiaomi-token-plan-ams.json"),
+    ),
+    (
+        "xiaomi-token-plan-cn.json",
+        include_str!("../data/providers/xiaomi-token-plan-cn.json"),
+    ),
+    (
+        "xiaomi-token-plan-sgp.json",
+        include_str!("../data/providers/xiaomi-token-plan-sgp.json"),
+    ),
+    ("zai.json", include_str!("../data/providers/zai.json")),
+    (
+        "zai-coding-cn.json",
+        include_str!("../data/providers/zai-coding-cn.json"),
+    ),
+];
