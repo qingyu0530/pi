@@ -8,11 +8,12 @@ use pi_ai::api::openai_completions::{
 };
 use pi_ai::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, AssistantRole, CacheControlFormat,
-    CacheRetention, Context, ConversationMessage, ImageContent, InputType, MaxTokensField, Model,
-    ModelCompat, ModelCost, ModelCostRates, ModelCostTier, ModelThinkingLevel,
-    OpenAICompletionsCompat, OpenRouterRouting, Provider, RequestOptions, StopReason, TextContent,
-    Tool, ToolCall, ToolResultContent, ToolResultMessage, ToolResultRole, Usage, UsageCost,
-    UserContent, UserMessage, UserMessageContent, UserRole, VercelGatewayRouting, calculate_cost,
+    CacheRetention, ChatTemplateKwargValue, ChatTemplateVar, Context, ConversationMessage,
+    ImageContent, InputType, MaxTokensField, Model, ModelCompat, ModelCost, ModelCostRates,
+    ModelCostTier, ModelThinkingLevel, OpenAICompletionsCompat, OpenRouterRouting, Provider,
+    RequestOptions, StopReason, TextContent, ThinkingFormat, Tool, ToolCall, ToolResultContent,
+    ToolResultMessage, ToolResultRole, Usage, UsageCost, UserContent, UserMessage,
+    UserMessageContent, UserRole, VercelGatewayRouting, calculate_cost,
     detect_openai_completions_compat,
 };
 use serde_json::json;
@@ -1105,6 +1106,425 @@ fn openrouter_effort_uses_reasoning_object() {
     let value = serde_json::to_value(request).unwrap();
 
     assert_eq!(value["reasoning"]["effort"], "low");
+}
+
+#[test]
+fn zai_effort_sets_thinking_object_and_reasoning_effort() {
+    let mut zai = model();
+    zai.reasoning = true;
+    with_compat(
+        &mut zai,
+        OpenAICompletionsCompat {
+            thinking_format: Some(ThinkingFormat::Zai),
+            supports_reasoning_effort: Some(true),
+            ..OpenAICompletionsCompat::default()
+        },
+    );
+    let options = RequestOptions {
+        reasoning_effort: Some(ModelThinkingLevel::High),
+        ..RequestOptions::default()
+    };
+
+    let request = build_request(&zai, &context(None, vec![user_text("hi").into()]), &options);
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(value["thinking"]["type"], "enabled");
+    assert_eq!(value["thinking"]["clear_thinking"], false);
+    assert_eq!(value["reasoning_effort"], "high");
+}
+
+#[test]
+fn zai_null_mapped_effort_omits_reasoning_effort() {
+    let mut zai = model();
+    zai.reasoning = true;
+    zai.thinking_level_map = Some(std::collections::HashMap::from([(
+        ModelThinkingLevel::High,
+        None,
+    )]));
+    with_compat(
+        &mut zai,
+        OpenAICompletionsCompat {
+            thinking_format: Some(ThinkingFormat::Zai),
+            supports_reasoning_effort: Some(true),
+            ..OpenAICompletionsCompat::default()
+        },
+    );
+    let options = RequestOptions {
+        reasoning_effort: Some(ModelThinkingLevel::High),
+        ..RequestOptions::default()
+    };
+
+    let request = build_request(&zai, &context(None, vec![user_text("hi").into()]), &options);
+    let value = serde_json::to_value(request).unwrap();
+
+    // 映射为 null（不支持）时 zai 不发 reasoning_effort。
+    assert!(value.get("reasoning_effort").is_none());
+}
+
+#[test]
+fn qwen_uses_toplevel_enable_thinking() {
+    let mut qwen = model();
+    qwen.reasoning = true;
+    with_compat(
+        &mut qwen,
+        OpenAICompletionsCompat {
+            thinking_format: Some(ThinkingFormat::Qwen),
+            supports_reasoning_effort: Some(true),
+            ..OpenAICompletionsCompat::default()
+        },
+    );
+    let options = RequestOptions {
+        reasoning_effort: Some(ModelThinkingLevel::High),
+        ..RequestOptions::default()
+    };
+
+    let request = build_request(
+        &qwen,
+        &context(None, vec![user_text("hi").into()]),
+        &options,
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(value["enable_thinking"], true);
+    assert_eq!(value["reasoning_effort"], "high");
+}
+
+#[test]
+fn qwen_without_effort_disables_thinking() {
+    let mut qwen = model();
+    qwen.reasoning = true;
+    with_compat(
+        &mut qwen,
+        OpenAICompletionsCompat {
+            thinking_format: Some(ThinkingFormat::Qwen),
+            ..OpenAICompletionsCompat::default()
+        },
+    );
+
+    let request = build_request(
+        &qwen,
+        &context(None, vec![user_text("hi").into()]),
+        &RequestOptions::default(),
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(value["enable_thinking"], false);
+}
+
+#[test]
+fn qwen_chat_template_sets_kwargs() {
+    let mut qwen = model();
+    qwen.reasoning = true;
+    with_compat(
+        &mut qwen,
+        OpenAICompletionsCompat {
+            thinking_format: Some(ThinkingFormat::QwenChatTemplate),
+            ..OpenAICompletionsCompat::default()
+        },
+    );
+    let options = RequestOptions {
+        reasoning_effort: Some(ModelThinkingLevel::High),
+        ..RequestOptions::default()
+    };
+
+    let request = build_request(
+        &qwen,
+        &context(None, vec![user_text("hi").into()]),
+        &options,
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(value["chat_template_kwargs"]["enable_thinking"], true);
+    assert_eq!(value["chat_template_kwargs"]["preserve_thinking"], true);
+}
+
+#[test]
+fn chat_template_resolves_var_references() {
+    let mut template = model();
+    template.reasoning = true;
+    template.thinking_level_map = Some(std::collections::HashMap::from([
+        (ModelThinkingLevel::High, Some("high-mapped".to_owned())),
+        (ModelThinkingLevel::Off, Some("off-mapped".to_owned())),
+    ]));
+    let kwargs = std::collections::HashMap::from([
+        (
+            "enable".to_owned(),
+            ChatTemplateKwargValue::Var(ChatTemplateVar {
+                var: "thinking.enabled".to_owned(),
+                omit_when_off: None,
+            }),
+        ),
+        (
+            "effort".to_owned(),
+            ChatTemplateKwargValue::Var(ChatTemplateVar {
+                var: "thinking.effort".to_owned(),
+                omit_when_off: None,
+            }),
+        ),
+        (
+            "static".to_owned(),
+            ChatTemplateKwargValue::String("fixed".to_owned()),
+        ),
+    ]);
+    with_compat(
+        &mut template,
+        OpenAICompletionsCompat {
+            thinking_format: Some(ThinkingFormat::ChatTemplate),
+            chat_template_kwargs: Some(kwargs),
+            ..OpenAICompletionsCompat::default()
+        },
+    );
+    let options = RequestOptions {
+        reasoning_effort: Some(ModelThinkingLevel::High),
+        ..RequestOptions::default()
+    };
+
+    let request = build_request(
+        &template,
+        &context(None, vec![user_text("hi").into()]),
+        &options,
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(value["chat_template_kwargs"]["enable"], true);
+    // effort 走 thinkingLevelMap 映射。
+    assert_eq!(value["chat_template_kwargs"]["effort"], "high-mapped");
+    // 标量直接透传。
+    assert_eq!(value["chat_template_kwargs"]["static"], "fixed");
+}
+
+#[test]
+fn chat_template_omits_var_when_off_and_requested() {
+    let mut template = model();
+    template.reasoning = true;
+    let kwargs = std::collections::HashMap::from([(
+        "effort".to_owned(),
+        ChatTemplateKwargValue::Var(ChatTemplateVar {
+            var: "thinking.effort".to_owned(),
+            omit_when_off: Some(true),
+        }),
+    )]);
+    with_compat(
+        &mut template,
+        OpenAICompletionsCompat {
+            thinking_format: Some(ThinkingFormat::ChatTemplate),
+            chat_template_kwargs: Some(kwargs),
+            ..OpenAICompletionsCompat::default()
+        },
+    );
+
+    // effort 关闭（off）+ omitWhenOff：整个键不发。
+    let request = build_request(
+        &template,
+        &context(None, vec![user_text("hi").into()]),
+        &RequestOptions::default(),
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    assert!(value.get("chat_template_kwargs").is_none());
+}
+
+#[test]
+fn baseten_uses_chat_template_args() {
+    let mut baseten = model();
+    baseten.reasoning = true;
+    let args = std::collections::HashMap::from([(
+        "enable".to_owned(),
+        ChatTemplateKwargValue::Var(ChatTemplateVar {
+            var: "thinking.enabled".to_owned(),
+            omit_when_off: None,
+        }),
+    )]);
+    with_compat(
+        &mut baseten,
+        OpenAICompletionsCompat {
+            thinking_format: Some(ThinkingFormat::Baseten),
+            chat_template_args: Some(args),
+            supports_reasoning_effort: Some(true),
+            ..OpenAICompletionsCompat::default()
+        },
+    );
+    let options = RequestOptions {
+        reasoning_effort: Some(ModelThinkingLevel::High),
+        ..RequestOptions::default()
+    };
+
+    let request = build_request(
+        &baseten,
+        &context(None, vec![user_text("hi").into()]),
+        &options,
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(value["chat_template_args"]["enable"], true);
+    assert_eq!(value["reasoning_effort"], "high");
+}
+
+#[test]
+fn ant_ling_sends_reasoning_only_with_mapped_effort() {
+    let mut ant_ling = model();
+    ant_ling.reasoning = true;
+    ant_ling.thinking_level_map = Some(std::collections::HashMap::from([(
+        ModelThinkingLevel::High,
+        Some("high-mapped".to_owned()),
+    )]));
+    with_compat(
+        &mut ant_ling,
+        OpenAICompletionsCompat {
+            thinking_format: Some(ThinkingFormat::AntLing),
+            ..OpenAICompletionsCompat::default()
+        },
+    );
+    let options = RequestOptions {
+        reasoning_effort: Some(ModelThinkingLevel::High),
+        ..RequestOptions::default()
+    };
+
+    let request = build_request(
+        &ant_ling,
+        &context(None, vec![user_text("hi").into()]),
+        &options,
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    // ant-ling 只在显式映射成字符串时发 reasoning.effort，无 fallback。
+    assert_eq!(value["reasoning"]["effort"], "high-mapped");
+}
+
+#[test]
+fn ant_ling_without_mapping_omits_reasoning() {
+    let mut ant_ling = model();
+    ant_ling.reasoning = true;
+    with_compat(
+        &mut ant_ling,
+        OpenAICompletionsCompat {
+            thinking_format: Some(ThinkingFormat::AntLing),
+            ..OpenAICompletionsCompat::default()
+        },
+    );
+    let options = RequestOptions {
+        reasoning_effort: Some(ModelThinkingLevel::High),
+        ..RequestOptions::default()
+    };
+
+    let request = build_request(
+        &ant_ling,
+        &context(None, vec![user_text("hi").into()]),
+        &options,
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    // 未映射时 ant-ling 不发 reasoning。
+    assert!(value.get("reasoning").is_none());
+}
+
+#[test]
+fn together_uses_reasoning_enabled_flag() {
+    let mut together = model();
+    together.reasoning = true;
+    with_compat(
+        &mut together,
+        OpenAICompletionsCompat {
+            thinking_format: Some(ThinkingFormat::Together),
+            supports_reasoning_effort: Some(true),
+            ..OpenAICompletionsCompat::default()
+        },
+    );
+    let options = RequestOptions {
+        reasoning_effort: Some(ModelThinkingLevel::High),
+        ..RequestOptions::default()
+    };
+
+    let request = build_request(
+        &together,
+        &context(None, vec![user_text("hi").into()]),
+        &options,
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(value["reasoning"]["enabled"], true);
+    assert_eq!(value["reasoning_effort"], "high");
+}
+
+#[test]
+fn string_thinking_sends_toplevel_string() {
+    let mut model = model();
+    model.reasoning = true;
+    with_compat(
+        &mut model,
+        OpenAICompletionsCompat {
+            thinking_format: Some(ThinkingFormat::StringThinking),
+            ..OpenAICompletionsCompat::default()
+        },
+    );
+    let options = RequestOptions {
+        reasoning_effort: Some(ModelThinkingLevel::High),
+        ..RequestOptions::default()
+    };
+
+    let request = build_request(
+        &model,
+        &context(None, vec![user_text("hi").into()]),
+        &options,
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    // string-thinking：顶层 thinking 直接是字符串。
+    assert_eq!(value["thinking"], "high");
+    assert!(value["thinking"].is_string());
+}
+
+#[test]
+fn zai_tool_stream_sent_with_tools() {
+    let mut zai = model();
+    zai.reasoning = true;
+    with_compat(
+        &mut zai,
+        OpenAICompletionsCompat {
+            thinking_format: Some(ThinkingFormat::Zai),
+            zai_tool_stream: Some(true),
+            ..OpenAICompletionsCompat::default()
+        },
+    );
+    let tools = vec![Tool {
+        name: "echo".to_owned(),
+        description: "回显".to_owned(),
+        parameters: json!({"type": "object"}),
+        constrained_sampling: None,
+    }];
+    let request_context = Context {
+        system_prompt: None,
+        messages: vec![user_text("hi").into()],
+        tools: Some(tools),
+    };
+
+    let request = build_request(&zai, &request_context, &RequestOptions::default());
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(value["tool_stream"], true);
+}
+
+#[test]
+fn zai_tool_stream_not_sent_without_tools() {
+    let mut zai = model();
+    zai.reasoning = true;
+    with_compat(
+        &mut zai,
+        OpenAICompletionsCompat {
+            thinking_format: Some(ThinkingFormat::Zai),
+            zai_tool_stream: Some(true),
+            ..OpenAICompletionsCompat::default()
+        },
+    );
+
+    let request = build_request(
+        &zai,
+        &context(None, vec![user_text("hi").into()]),
+        &RequestOptions::default(),
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    assert!(value.get("tool_stream").is_none());
 }
 
 #[test]

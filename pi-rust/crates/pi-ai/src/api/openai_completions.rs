@@ -71,12 +71,24 @@ pub struct ChatRequest {
     /// OpenAI / DeepSeek 风格的推理强度字段。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
-    /// DeepSeek / zai 的 thinking 开关。
+    /// DeepSeek / zai 的 thinking 开关；string-thinking 厂商则是顶层字符串。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<ThinkingParam>,
-    /// OpenRouter 的推理配置。
+    pub thinking: Option<ThinkingField>,
+    /// OpenRouter / together / ant-ling 的推理配置。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ReasoningParam>,
+    /// qwen 的顶层思考开关。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_thinking: Option<bool>,
+    /// chat-template / qwen-chat-template 的模板参数。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_template_kwargs: Option<HashMap<String, Value>>,
+    /// baseten 的模板参数（字段名是 chat_template_args）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_template_args: Option<HashMap<String, Value>>,
+    /// zai 的流式工具调用增量开关。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_stream: Option<bool>,
     /// OpenAI 提示缓存的 key（用 session id，最长 64 字符）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<String>,
@@ -102,6 +114,19 @@ pub struct VercelProviderOptions {
     pub gateway: VercelGatewayRouting,
 }
 
+/// `thinking` 字段的两种形状：对象（DeepSeek/zai）或字符串（string-thinking）。
+///
+/// 原版同一字段在不同厂商请求里形状不同，用 untagged 枚举表达：
+/// 序列化时直接写内部值，不包变体名。
+#[derive(Clone, Debug, Serialize)]
+#[serde(untagged)]
+pub enum ThinkingField {
+    /// DeepSeek / zai 的对象形式：`{"type": "enabled"}`。
+    Object(ThinkingParam),
+    /// string-thinking 厂商的字符串形式：`"high"`。
+    Text(String),
+}
+
 /// DeepSeek / zai 的 `thinking` 参数：开或关。
 #[derive(Clone, Debug, Serialize)]
 pub struct ThinkingParam {
@@ -111,9 +136,12 @@ pub struct ThinkingParam {
     pub clear_thinking: Option<bool>,
 }
 
-/// OpenRouter 的 `reasoning` 参数。
+/// OpenRouter / together / ant-ling 的 `reasoning` 参数。
 #[derive(Clone, Debug, Serialize)]
 pub struct ReasoningParam {
+    /// together 用 `enabled` 布尔开关。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
 }
@@ -395,6 +423,14 @@ pub fn build_request(model: &Model, context: &Context, options: &RequestOptions)
         reasoning_effort: thinking.reasoning_effort,
         thinking: thinking.thinking,
         reasoning: thinking.reasoning,
+        enable_thinking: thinking.enable_thinking,
+        chat_template_kwargs: thinking.chat_template_kwargs,
+        chat_template_args: thinking.chat_template_args,
+        // zai 的流式工具调用增量；只在有工具时才发。
+        tool_stream: compat
+            .zai_tool_stream
+            .then_some(true)
+            .filter(|_| tools.is_some()),
         prompt_cache_key,
         prompt_cache_retention,
         tools,
@@ -475,15 +511,21 @@ fn clamp_prompt_cache_key(key: &str) -> String {
 #[derive(Clone, Debug, Default)]
 struct ThinkingParams {
     reasoning_effort: Option<String>,
-    thinking: Option<ThinkingParam>,
+    thinking: Option<ThinkingField>,
     reasoning: Option<ReasoningParam>,
+    enable_thinking: Option<bool>,
+    chat_template_kwargs: Option<HashMap<String, Value>>,
+    chat_template_args: Option<HashMap<String, Value>>,
 }
 
 /// 按 `thinking_format` 把 `reasoning_effort` 翻译成服务端要的字段。
 ///
-/// 目前支持三种常见格式：OpenAI 风格（`reasoning_effort`）、
-/// DeepSeek（`thinking` + `reasoning_effort`）、OpenRouter（`reasoning.effort`）。
-/// 其余格式（zai/qwen/chat-template 等）暂按 OpenAI 风格处理。
+/// 对照原版 openai-completions.ts，共 11 种格式。各分支对 thinkingLevelMap 的
+/// 取值规则有细微差别：
+/// - 宽松（`?? 级别名`）：映射为 null 或未映射都用级别名兜底——deepseek/qwen/
+///   openrouter/together/string-thinking/openai；
+/// - 严格（null 不发，未映射兜底）：zai / baseten；
+/// - 最严格（必须显式映射成字符串才发）：ant-ling。
 fn resolve_thinking_params(
     model: &Model,
     compat: &ResolvedOpenAICompletionsCompat,
@@ -506,15 +548,15 @@ fn resolve_thinking_params(
         // DeepSeek 要一个 thinking 对象 + 可选 reasoning_effort。
         ThinkingFormat::Deepseek => {
             if effort.is_some() {
-                params.thinking = Some(ThinkingParam {
+                params.thinking = Some(ThinkingField::Object(ThinkingParam {
                     kind: "enabled".to_owned(),
                     clear_thinking: None,
-                });
+                }));
             } else if !off_is_disabled {
-                params.thinking = Some(ThinkingParam {
+                params.thinking = Some(ThinkingField::Object(ThinkingParam {
                     kind: "disabled".to_owned(),
                     clear_thinking: None,
-                });
+                }));
             }
             if let Some(level) = effort {
                 if compat.supports_reasoning_effort {
@@ -533,12 +575,109 @@ fn resolve_thinking_params(
             };
             if let Some(effort) = value {
                 params.reasoning = Some(ReasoningParam {
+                    enabled: None,
                     effort: Some(effort),
                 });
             }
         }
+        // zai：thinking 对象带 clear_thinking，映射为 null 时不发 reasoning_effort。
+        ThinkingFormat::Zai => {
+            params.thinking = Some(ThinkingField::Object(ThinkingParam {
+                kind: if effort.is_some() {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+                .to_owned(),
+                clear_thinking: effort.is_some().then_some(false),
+            }));
+            if let Some(level) = effort {
+                if compat.supports_reasoning_effort {
+                    if let Some(value) = mapped_effort_strict(model, level) {
+                        params.reasoning_effort = Some(value);
+                    }
+                }
+            }
+        }
+        // qwen：顶层 enable_thinking 布尔开关。
+        ThinkingFormat::Qwen => {
+            params.enable_thinking = Some(effort.is_some());
+            if let Some(level) = effort {
+                if compat.supports_reasoning_effort {
+                    params.reasoning_effort = Some(mapped_effort(model, level));
+                }
+            }
+        }
+        // qwen-chat-template：固定的两个模板参数。
+        ThinkingFormat::QwenChatTemplate => {
+            let mut kwargs = HashMap::new();
+            kwargs.insert("enable_thinking".to_owned(), Value::Bool(effort.is_some()));
+            kwargs.insert("preserve_thinking".to_owned(), Value::Bool(true));
+            params.chat_template_kwargs = Some(kwargs);
+        }
+        // chat-template：按 compat.chat_template_kwargs 里的 $var 引用解析。
+        ThinkingFormat::ChatTemplate => {
+            if let Some(values) = &compat.chat_template_kwargs {
+                params.chat_template_kwargs = resolve_chat_template_values(model, options, values);
+            }
+        }
+        // baseten：模板参数走 chat_template_args，reasoning_effort 规则同 zai。
+        ThinkingFormat::Baseten => {
+            if let Some(values) = &compat.chat_template_args {
+                params.chat_template_args = resolve_chat_template_values(model, options, values);
+            }
+            if compat.supports_reasoning_effort {
+                let value = match effort {
+                    Some(level) => mapped_effort_strict(model, level),
+                    None => off_effort_strict(model),
+                };
+                if let Some(value) = value {
+                    params.reasoning_effort = Some(value);
+                }
+            }
+        }
+        // ant-ling：只在 effort 有值且显式映射成字符串时发 reasoning.effort。
+        ThinkingFormat::AntLing => {
+            if let Some(level) = effort {
+                if let Some(Some(value)) = model
+                    .thinking_level_map
+                    .as_ref()
+                    .and_then(|map| map.get(&level))
+                {
+                    params.reasoning = Some(ReasoningParam {
+                        enabled: None,
+                        effort: Some(value.clone()),
+                    });
+                }
+            }
+        }
+        // together：reasoning.enabled 布尔开关 + 可选 reasoning_effort。
+        ThinkingFormat::Together => {
+            params.reasoning = Some(ReasoningParam {
+                enabled: Some(effort.is_some()),
+                effort: None,
+            });
+            if let Some(level) = effort {
+                if compat.supports_reasoning_effort {
+                    params.reasoning_effort = Some(mapped_effort(model, level));
+                }
+            }
+        }
+        // string-thinking：顶层 thinking 直接是字符串。
+        ThinkingFormat::StringThinking => {
+            let value = if let Some(level) = effort {
+                Some(mapped_effort(model, level))
+            } else if !off_is_disabled {
+                Some(off_effort(model))
+            } else {
+                None
+            };
+            if let Some(value) = value {
+                params.thinking = Some(ThinkingField::Text(value));
+            }
+        }
         // OpenAI 风格，直接发 reasoning_effort
-        _ => {
+        ThinkingFormat::Openai => {
             if !compat.supports_reasoning_effort {
                 return params;
             }
@@ -574,6 +713,88 @@ fn off_effort(model: &Model) -> String {
         .and_then(|map| map.get(&ModelThinkingLevel::Off))
         .and_then(|value| value.clone())
         .unwrap_or_else(|| "none".to_owned())
+}
+
+/// 严格版取值：映射为 null（不支持）时返回 `None`；未映射时用级别名兜底。
+///
+/// zai / baseten 用这个规则（原版用 `=== undefined` 判断，null 不发送）。
+fn mapped_effort_strict(model: &Model, level: ModelThinkingLevel) -> Option<String> {
+    match model
+        .thinking_level_map
+        .as_ref()
+        .and_then(|map| map.get(&level))
+    {
+        Some(Some(value)) => Some(value.clone()),
+        Some(None) => None,
+        None => Some(model_thinking_level_name(level).to_owned()),
+    }
+}
+
+/// off 级别的严格取值：映射为 null 或未映射时都返回 `None`（不发字段）。
+fn off_effort_strict(model: &Model) -> Option<String> {
+    model
+        .thinking_level_map
+        .as_ref()
+        .and_then(|map| map.get(&ModelThinkingLevel::Off))
+        .and_then(|value| value.clone())
+}
+
+/// 把模板参数标量转成 JSON 值。
+fn kwarg_to_value(value: &crate::compat::ChatTemplateKwargValue) -> Value {
+    match value {
+        crate::compat::ChatTemplateKwargValue::String(text) => Value::String(text.clone()),
+        crate::compat::ChatTemplateKwargValue::Number(number) => {
+            Value::Number(serde_json::Number::from_f64(*number).unwrap_or_else(|| 0.into()))
+        }
+        crate::compat::ChatTemplateKwargValue::Bool(flag) => Value::Bool(*flag),
+        crate::compat::ChatTemplateKwargValue::Null => Value::Null,
+        // Var 形态由 resolve_chat_template_value 单独处理，这里兜底成 null。
+        crate::compat::ChatTemplateKwargValue::Var(_) => Value::Null,
+    }
+}
+
+/// 解析模板参数表：标量透传，`$var` 引用按思考状态求值。
+fn resolve_chat_template_values(
+    model: &Model,
+    options: &RequestOptions,
+    values: &HashMap<String, crate::compat::ChatTemplateKwargValue>,
+) -> Option<HashMap<String, Value>> {
+    let mut resolved = HashMap::new();
+    for (key, value) in values {
+        if let Some(resolved_value) = resolve_chat_template_value(model, options, value) {
+            resolved.insert(key.clone(), resolved_value);
+        }
+    }
+    (!resolved.is_empty()).then_some(resolved)
+}
+
+/// 解析单个模板参数：
+/// - 标量直接透传；
+/// - `$var` 引用按 pi 的思考状态求值（enabled 布尔、effort 取映射值）。
+fn resolve_chat_template_value(
+    model: &Model,
+    options: &RequestOptions,
+    value: &crate::compat::ChatTemplateKwargValue,
+) -> Option<Value> {
+    let var = match value {
+        crate::compat::ChatTemplateKwargValue::Var(var) => var,
+        other => return Some(kwarg_to_value(other)),
+    };
+    // 思考关闭且配置了 omitWhenOff 时，整个键不发。
+    if options.reasoning_effort.is_none() && var.omit_when_off.unwrap_or(false) {
+        return None;
+    }
+    match var.var.as_str() {
+        // 是否开启思考。
+        "thinking.enabled" => Some(Value::Bool(options.reasoning_effort.is_some())),
+        // 思考 token 预算；预算来源（thinkingBudgets）尚未接入，暂不发。
+        "thinking.budget" => None,
+        // 其余（如 thinking.effort）按 thinkingLevelMap 映射取值。
+        _ => match options.reasoning_effort {
+            Some(level) => mapped_effort_strict(model, level).map(Value::String),
+            None => off_effort_strict(model).map(Value::String),
+        },
+    }
 }
 
 /// 思考级别对应的字符串（与 JSON 里的取值一致）。
