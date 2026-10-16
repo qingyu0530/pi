@@ -48,6 +48,18 @@ pub enum ModelThinkingLevel {
 /// 值为 None 表示该级别不受支持；键缺失表示使用 Provider 默认值。
 pub type ThinkingLevelMap = HashMap<ModelThinkingLevel, Option<String>>;
 
+/// 各思考级别的 token 预算（只对带顶点预算字段的厂商生效）。
+/// 原版：export interface ThinkingBudgets { minimal?, low?, medium?, high? }
+///
+/// 字段缺失时用内置默认值（minimal 1024 / low 2048 / medium 8192 / high 16384）。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ThinkingBudgets {
+    pub minimal: Option<u64>,
+    pub low: Option<u64>,
+    pub medium: Option<u64>,
+    pub high: Option<u64>,
+}
+
 /// 模型支持的输入内容类型。
 /// 原版：input: ("text" | "image")[]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

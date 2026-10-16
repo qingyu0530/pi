@@ -248,6 +248,7 @@ fn options_temperature_is_sent_when_thinking_is_off() {
         reasoning_effort: None,
         session_id: None,
         cache_retention: None,
+        thinking_budgets: None,
     };
     let value = serde_json::to_value(build_request(
         &model(),

@@ -48,7 +48,7 @@ pub use message::{
     ToolResultRole, Usage, UsageCost, UserMessage, UserMessageContent, UserRole,
 };
 pub use model::{
-    ImagesModel, InputType, Model, ModelCompat, ModelThinkingLevel, ThinkingLevel,
+    ImagesModel, InputType, Model, ModelCompat, ModelThinkingLevel, ThinkingBudgets, ThinkingLevel,
     ThinkingLevelMap, calculate_cost,
 };
 pub use models::{ModelRegistry, RegistryError};

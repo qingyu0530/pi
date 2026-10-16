@@ -19,7 +19,7 @@ use crate::api::openai_compat::{
 };
 use crate::compat::{
     CacheControlFormat, MaxTokensField, OpenRouterRouting, SessionAffinityFormat, ThinkingFormat,
-    VercelGatewayRouting,
+    ThinkingTokenBudgetField, VercelGatewayRouting,
 };
 use crate::content::{
     AssistantContent, TextContent, ThinkingContent, ToolCall, ToolResultContent, UserContent,
@@ -30,7 +30,7 @@ use crate::message::{
     AssistantMessage, AssistantRole, ConversationMessage, StopReason, ToolResultMessage, Usage,
     UsageCost, UserMessage, UserMessageContent,
 };
-use crate::model::{Model, ModelThinkingLevel, calculate_cost};
+use crate::model::{Model, ModelThinkingLevel, ThinkingBudgets, calculate_cost};
 use crate::provider::{CacheRetention, Provider, RequestOptions};
 
 /// `POST /chat/completions` 的请求体。
@@ -89,6 +89,15 @@ pub struct ChatRequest {
     /// zai 的流式工具调用增量开关。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_stream: Option<bool>,
+    /// 思考 token 预算（vLLM 字段名）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_token_budget: Option<u64>,
+    /// 思考 token 预算（Qwen/DashScope/SGLang 字段名）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<u64>,
+    /// 思考 token 预算（llama.cpp 字段名）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_budget_tokens: Option<u64>,
     /// OpenAI 提示缓存的 key（用 session id，最长 64 字符）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<String>,
@@ -375,8 +384,11 @@ pub fn build_request(model: &Model, context: &Context, options: &RequestOptions)
             gateway: routing.clone(),
         })
     });
+    // 思考 token 预算：厂商配置了预算字段、本次指定了思考级别时才计算。
+    let thinking_budget_field = resolve_thinking_budget_field(&compat);
+    let thinking_budget_value = resolve_thinking_budget(model, options, max_tokens_value);
     // 按 thinking_format 把 reasoning_effort 变成各厂商要求的思考字段。
-    let thinking = resolve_thinking_params(model, &compat, options);
+    let thinking = resolve_thinking_params(model, &compat, options, thinking_budget_value);
     // OpenAI 提示缓存：默认 short；none 时不发缓存字段。
     let cache_retention = options.cache_retention.unwrap_or_default();
     let cache_session_id = (cache_retention != CacheRetention::None)
@@ -406,6 +418,21 @@ pub fn build_request(model: &Model, context: &Context, options: &RequestOptions)
         apply_anthropic_cache_control(&mut messages, tools.as_mut(), &cache_control);
     }
 
+    // 预算字段名三选一：按 compat 的字段名把预算写进对应字段。
+    let (thinking_token_budget, thinking_budget, thinking_budget_tokens) =
+        match (thinking_budget_field, thinking_budget_value) {
+            (Some(ThinkingTokenBudgetField::ThinkingTokenBudget), Some(value)) => {
+                (Some(value), None, None)
+            }
+            (Some(ThinkingTokenBudgetField::ThinkingBudget), Some(value)) => {
+                (None, Some(value), None)
+            }
+            (Some(ThinkingTokenBudgetField::ThinkingBudgetTokens), Some(value)) => {
+                (None, None, Some(value))
+            }
+            _ => (None, None, None),
+        };
+
     ChatRequest {
         model: model.id.clone(),
         messages,
@@ -431,6 +458,9 @@ pub fn build_request(model: &Model, context: &Context, options: &RequestOptions)
             .zai_tool_stream
             .then_some(true)
             .filter(|_| tools.is_some()),
+        thinking_token_budget,
+        thinking_budget,
+        thinking_budget_tokens,
         prompt_cache_key,
         prompt_cache_retention,
         tools,
@@ -530,6 +560,7 @@ fn resolve_thinking_params(
     model: &Model,
     compat: &ResolvedOpenAICompletionsCompat,
     options: &RequestOptions,
+    thinking_budget: Option<u64>,
 ) -> ThinkingParams {
     let mut params = ThinkingParams::default();
     // 非推理模型不发送任何思考参数。
@@ -618,13 +649,15 @@ fn resolve_thinking_params(
         // chat-template：按 compat.chat_template_kwargs 里的 $var 引用解析。
         ThinkingFormat::ChatTemplate => {
             if let Some(values) = &compat.chat_template_kwargs {
-                params.chat_template_kwargs = resolve_chat_template_values(model, options, values);
+                params.chat_template_kwargs =
+                    resolve_chat_template_values(model, options, values, thinking_budget);
             }
         }
         // baseten：模板参数走 chat_template_args，reasoning_effort 规则同 zai。
         ThinkingFormat::Baseten => {
             if let Some(values) = &compat.chat_template_args {
-                params.chat_template_args = resolve_chat_template_values(model, options, values);
+                params.chat_template_args =
+                    resolve_chat_template_values(model, options, values, thinking_budget);
             }
             if compat.supports_reasoning_effort {
                 let value = match effort {
@@ -758,10 +791,13 @@ fn resolve_chat_template_values(
     model: &Model,
     options: &RequestOptions,
     values: &HashMap<String, crate::compat::ChatTemplateKwargValue>,
+    thinking_budget: Option<u64>,
 ) -> Option<HashMap<String, Value>> {
     let mut resolved = HashMap::new();
     for (key, value) in values {
-        if let Some(resolved_value) = resolve_chat_template_value(model, options, value) {
+        if let Some(resolved_value) =
+            resolve_chat_template_value(model, options, value, thinking_budget)
+        {
             resolved.insert(key.clone(), resolved_value);
         }
     }
@@ -770,11 +806,12 @@ fn resolve_chat_template_values(
 
 /// 解析单个模板参数：
 /// - 标量直接透传；
-/// - `$var` 引用按 pi 的思考状态求值（enabled 布尔、effort 取映射值）。
+/// - `$var` 引用按 pi 的思考状态求值（enabled 布尔、budget 数字、effort 取映射值）。
 fn resolve_chat_template_value(
     model: &Model,
     options: &RequestOptions,
     value: &crate::compat::ChatTemplateKwargValue,
+    thinking_budget: Option<u64>,
 ) -> Option<Value> {
     let var = match value {
         crate::compat::ChatTemplateKwargValue::Var(var) => var,
@@ -787,14 +824,74 @@ fn resolve_chat_template_value(
     match var.var.as_str() {
         // 是否开启思考。
         "thinking.enabled" => Some(Value::Bool(options.reasoning_effort.is_some())),
-        // 思考 token 预算；预算来源（thinkingBudgets）尚未接入，暂不发。
-        "thinking.budget" => None,
+        // 思考 token 预算；没有预算时不发这个键。
+        "thinking.budget" => thinking_budget.map(|budget| Value::Number(budget.into())),
         // 其余（如 thinking.effort）按 thinkingLevelMap 映射取值。
         _ => match options.reasoning_effort {
             Some(level) => mapped_effort_strict(model, level).map(Value::String),
             None => off_effort_strict(model).map(Value::String),
         },
     }
+}
+
+/// 回答至少保留的 token 数（思考预算与回答共享 max_tokens 时）。
+const MIN_ANSWER_TOKENS: u64 = 1024;
+
+/// 预算字段名：compat 显式指定优先；否则支持预算时用 vLLM 的字段名。
+fn resolve_thinking_budget_field(
+    compat: &ResolvedOpenAICompletionsCompat,
+) -> Option<ThinkingTokenBudgetField> {
+    compat.thinking_token_budget_field.or(compat
+        .supports_thinking_token_budget
+        .then_some(ThinkingTokenBudgetField::ThinkingTokenBudget))
+}
+
+/// 计算本次请求的思考 token 预算；不适用时返回 `None`。
+///
+/// 需要同时满足：本次指定了思考级别、模型支持推理。
+/// 预算还要按响应上限裁剪，保证至少留回答空间。
+fn resolve_thinking_budget(model: &Model, options: &RequestOptions, ceiling: u64) -> Option<u64> {
+    let level = options.reasoning_effort?;
+    if !model.reasoning {
+        return None;
+    }
+    let budget = thinking_budget_for_level(level, options.thinking_budgets.as_ref())?;
+    let clamped = clamp_thinking_budget_to_answer_room(budget, ceiling);
+    (clamped > 0).then_some(clamped)
+}
+
+/// 级别对应的预算：自定义值优先，否则用默认值；`off` 没有预算。
+fn thinking_budget_for_level(
+    level: ModelThinkingLevel,
+    custom: Option<&ThinkingBudgets>,
+) -> Option<u64> {
+    // xhigh / max 归一到 high（原版 clampReasoning）。
+    let level = match level {
+        ModelThinkingLevel::Xhigh | ModelThinkingLevel::Max => ModelThinkingLevel::High,
+        other => other,
+    };
+    // 内置默认值（原版 DEFAULT_THINKING_BUDGETS）。
+    let default = match level {
+        ModelThinkingLevel::Minimal => 1024,
+        ModelThinkingLevel::Low => 2048,
+        ModelThinkingLevel::Medium => 8192,
+        ModelThinkingLevel::High => 16384,
+        // off（以及不应出现的 xhigh/max）没有预算。
+        _ => return None,
+    };
+    let custom_value = custom.and_then(|budgets| match level {
+        ModelThinkingLevel::Minimal => budgets.minimal,
+        ModelThinkingLevel::Low => budgets.low,
+        ModelThinkingLevel::Medium => budgets.medium,
+        ModelThinkingLevel::High => budgets.high,
+        _ => None,
+    });
+    Some(custom_value.unwrap_or(default))
+}
+
+/// 预算不能吃掉整个响应：至少给回答留 `MIN_ANSWER_TOKENS`。
+fn clamp_thinking_budget_to_answer_room(budget: u64, ceiling: u64) -> u64 {
+    budget.min(ceiling.saturating_sub(MIN_ANSWER_TOKENS))
 }
 
 /// 思考级别对应的字符串（与 JSON 里的取值一致）。

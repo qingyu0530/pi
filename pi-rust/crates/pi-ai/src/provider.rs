@@ -20,7 +20,7 @@ use crate::message::{
     AssistantMessage, AssistantRole, ConversationMessage, StopReason, Usage, UsageCost,
     UserMessageContent,
 };
-use crate::model::{Model, ModelThinkingLevel};
+use crate::model::{Model, ModelThinkingLevel, ThinkingBudgets};
 
 /// 提示缓存保留策略。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -52,6 +52,8 @@ pub struct RequestOptions {
     pub session_id: Option<String>,
     /// 提示缓存保留策略；`None` 表示按默认（short）。
     pub cache_retention: Option<CacheRetention>,
+    /// 各思考级别的 token 预算；`None` 表示用内置默认值（有预算字段的厂商才生效）。
+    pub thinking_budgets: Option<ThinkingBudgets>,
 }
 
 /// 运行时单元：持有模型目录，并把一次请求转换成流式事件。

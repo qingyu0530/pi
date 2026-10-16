@@ -11,10 +11,10 @@ use pi_ai::{
     CacheRetention, ChatTemplateKwargValue, ChatTemplateVar, Context, ConversationMessage,
     ImageContent, InputType, MaxTokensField, Model, ModelCompat, ModelCost, ModelCostRates,
     ModelCostTier, ModelThinkingLevel, OpenAICompletionsCompat, OpenRouterRouting, Provider,
-    RequestOptions, StopReason, TextContent, ThinkingFormat, Tool, ToolCall, ToolResultContent,
-    ToolResultMessage, ToolResultRole, Usage, UsageCost, UserContent, UserMessage,
-    UserMessageContent, UserRole, VercelGatewayRouting, calculate_cost,
-    detect_openai_completions_compat,
+    RequestOptions, StopReason, TextContent, ThinkingBudgets, ThinkingFormat,
+    ThinkingTokenBudgetField, Tool, ToolCall, ToolResultContent, ToolResultMessage, ToolResultRole,
+    Usage, UsageCost, UserContent, UserMessage, UserMessageContent, UserRole, VercelGatewayRouting,
+    calculate_cost, detect_openai_completions_compat,
 };
 use serde_json::json;
 use std::cell::RefCell;
@@ -125,6 +125,7 @@ fn request_uses_options_temperature_and_max_tokens() {
         reasoning_effort: None,
         session_id: None,
         cache_retention: None,
+        thinking_budgets: None,
     };
     let request = build_request(
         &model(),
@@ -1525,6 +1526,201 @@ fn zai_tool_stream_not_sent_without_tools() {
     let value = serde_json::to_value(request).unwrap();
 
     assert!(value.get("tool_stream").is_none());
+}
+
+/// 构造一个配置了预算字段的推理模型。
+fn reasoning_model_with_budget_field(field: ThinkingTokenBudgetField) -> Model {
+    let mut model = model();
+    model.reasoning = true;
+    with_compat(
+        &mut model,
+        OpenAICompletionsCompat {
+            thinking_token_budget_field: Some(field),
+            ..OpenAICompletionsCompat::default()
+        },
+    );
+    model
+}
+
+#[test]
+fn thinking_token_budget_sent_when_configured() {
+    let model = reasoning_model_with_budget_field(ThinkingTokenBudgetField::ThinkingTokenBudget);
+    let options = RequestOptions {
+        reasoning_effort: Some(ModelThinkingLevel::High),
+        max_tokens: Some(100_000),
+        ..RequestOptions::default()
+    };
+
+    let request = build_request(
+        &model,
+        &context(None, vec![user_text("hi").into()]),
+        &options,
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    // 默认 high 预算 16384。
+    assert_eq!(value["thinking_token_budget"], 16_384);
+}
+
+#[test]
+fn thinking_token_budget_supports_flag_uses_vllm_field() {
+    let mut model = model();
+    model.reasoning = true;
+    with_compat(
+        &mut model,
+        OpenAICompletionsCompat {
+            supports_thinking_token_budget: Some(true),
+            ..OpenAICompletionsCompat::default()
+        },
+    );
+    let options = RequestOptions {
+        reasoning_effort: Some(ModelThinkingLevel::Low),
+        max_tokens: Some(100_000),
+        ..RequestOptions::default()
+    };
+
+    let request = build_request(
+        &model,
+        &context(None, vec![user_text("hi").into()]),
+        &options,
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    // 默认 low 预算 2048，字段名是 vLLM 的。
+    assert_eq!(value["thinking_token_budget"], 2_048);
+}
+
+#[test]
+fn thinking_token_budget_qwen_field_name() {
+    let model = reasoning_model_with_budget_field(ThinkingTokenBudgetField::ThinkingBudget);
+    let options = RequestOptions {
+        reasoning_effort: Some(ModelThinkingLevel::Medium),
+        max_tokens: Some(100_000),
+        ..RequestOptions::default()
+    };
+
+    let request = build_request(
+        &model,
+        &context(None, vec![user_text("hi").into()]),
+        &options,
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(value["thinking_budget"], 8_192);
+    assert!(value.get("thinking_token_budget").is_none());
+}
+
+#[test]
+fn thinking_token_budget_uses_custom_budgets() {
+    let model = reasoning_model_with_budget_field(ThinkingTokenBudgetField::ThinkingBudgetTokens);
+    let options = RequestOptions {
+        reasoning_effort: Some(ModelThinkingLevel::High),
+        max_tokens: Some(100_000),
+        thinking_budgets: Some(ThinkingBudgets {
+            high: Some(5_000),
+            ..ThinkingBudgets::default()
+        }),
+        ..RequestOptions::default()
+    };
+
+    let request = build_request(
+        &model,
+        &context(None, vec![user_text("hi").into()]),
+        &options,
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(value["thinking_budget_tokens"], 5_000);
+}
+
+#[test]
+fn thinking_token_budget_clamped_to_leave_answer_room() {
+    let model = reasoning_model_with_budget_field(ThinkingTokenBudgetField::ThinkingTokenBudget);
+    let options = RequestOptions {
+        reasoning_effort: Some(ModelThinkingLevel::High),
+        // 上限只有 2000：预算被裁到 2000 - 1024 = 976。
+        max_tokens: Some(2_000),
+        ..RequestOptions::default()
+    };
+
+    let request = build_request(
+        &model,
+        &context(None, vec![user_text("hi").into()]),
+        &options,
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(value["thinking_token_budget"], 976);
+}
+
+#[test]
+fn thinking_token_budget_needs_reasoning_effort() {
+    let model = reasoning_model_with_budget_field(ThinkingTokenBudgetField::ThinkingTokenBudget);
+
+    let request = build_request(
+        &model,
+        &context(None, vec![user_text("hi").into()]),
+        &RequestOptions::default(),
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    assert!(value.get("thinking_token_budget").is_none());
+}
+
+#[test]
+fn xhigh_uses_high_budget() {
+    let model = reasoning_model_with_budget_field(ThinkingTokenBudgetField::ThinkingTokenBudget);
+    let options = RequestOptions {
+        reasoning_effort: Some(ModelThinkingLevel::Xhigh),
+        max_tokens: Some(100_000),
+        ..RequestOptions::default()
+    };
+
+    let request = build_request(
+        &model,
+        &context(None, vec![user_text("hi").into()]),
+        &options,
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    // xhigh 归一到 high：16384。
+    assert_eq!(value["thinking_token_budget"], 16_384);
+}
+
+#[test]
+fn chat_template_budget_var_uses_computed_budget() {
+    let mut template = model();
+    template.reasoning = true;
+    let kwargs = std::collections::HashMap::from([(
+        "budget".to_owned(),
+        ChatTemplateKwargValue::Var(ChatTemplateVar {
+            var: "thinking.budget".to_owned(),
+            omit_when_off: None,
+        }),
+    )]);
+    with_compat(
+        &mut template,
+        OpenAICompletionsCompat {
+            thinking_format: Some(ThinkingFormat::ChatTemplate),
+            chat_template_kwargs: Some(kwargs),
+            ..OpenAICompletionsCompat::default()
+        },
+    );
+    let options = RequestOptions {
+        reasoning_effort: Some(ModelThinkingLevel::High),
+        max_tokens: Some(100_000),
+        ..RequestOptions::default()
+    };
+
+    let request = build_request(
+        &template,
+        &context(None, vec![user_text("hi").into()]),
+        &options,
+    );
+    let value = serde_json::to_value(request).unwrap();
+
+    // 预算与顶层字段无关：chat-template 的 $var 也能拿到。
+    assert_eq!(value["chat_template_kwargs"]["budget"], 16_384);
 }
 
 #[test]
