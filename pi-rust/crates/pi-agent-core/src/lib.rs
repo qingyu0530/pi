@@ -220,18 +220,24 @@ impl Agent {
                 return Ok(message);
             }
 
-            // 执行工具，把结果追加进对话，然后进入下一轮请求。
-            let tool_results = self.execute_tool_calls(&message, sink);
+            // 执行工具，把结果追加进对话。整批工具都要求终止时不再请求模型。
+            let (tool_results, terminate) = self.execute_tool_calls(&message, sink);
             sink(AgentEvent::TurnEnd {
                 message: Box::new(message.clone()),
                 tool_results,
             });
+            if terminate {
+                return Ok(message);
+            }
         }
 
         Err(AgentError::MaxTurnsExceeded { limit: MAX_TURNS })
     }
 
-    /// 执行助手消息里的所有工具调用，追加对应的工具结果消息并返回它们。
+    /// 执行助手消息里的所有工具调用，追加对应的工具结果消息。
+    ///
+    /// 返回结果消息列表，以及是否应终止循环：批次非空且**每个**工具结果
+    /// 都设置 `terminate` 时为真（原版 shouldTerminateToolBatch 的「全员同意」规则）。
     ///
     /// 每个工具调用会发出 `ToolExecutionStart` / `ToolExecutionEnd`，
     /// 工具结果本身作为一条消息发出 `MessageStart` / `MessageEnd`。
@@ -239,10 +245,13 @@ impl Agent {
         &mut self,
         message: &AssistantMessage,
         sink: &mut dyn FnMut(AgentEvent),
-    ) -> Vec<ToolResultMessage> {
+    ) -> (Vec<ToolResultMessage>, bool) {
         let mut results = Vec::new();
+        let mut terminate = true;
+        let mut has_calls = false;
         for block in &message.content {
             if let AssistantContent::ToolCall(call) = block {
+                has_calls = true;
                 sink(AgentEvent::ToolExecutionStart {
                     tool_call_id: call.id.clone(),
                     tool_name: call.name.clone(),
@@ -250,6 +259,10 @@ impl Agent {
                 });
 
                 let (result, is_error) = self.execute_one(call);
+                // 只要有一个结果不要求终止，整批就不终止。
+                if !result.terminate {
+                    terminate = false;
+                }
                 sink(AgentEvent::ToolExecutionEnd {
                     tool_call_id: call.id.clone(),
                     tool_name: call.name.clone(),
@@ -268,7 +281,8 @@ impl Agent {
                 results.push(result_message);
             }
         }
-        results
+        // 空批次（没有工具调用）不触发终止。
+        (results, has_calls && terminate)
     }
 
     /// 执行单个工具调用，返回工具结果和是否失败。
@@ -427,7 +441,7 @@ fn tool_result_message(call: &ToolCall, result: ToolResult, is_error: bool) -> T
 
 #[cfg(test)]
 mod tests {
-    use super::{Agent, AgentError, AgentEvent};
+    use super::{Agent, AgentError, AgentEvent, AgentTool, ToolError, ToolResult};
     use pi_ai::{
         AssistantContent, AssistantMessage, AssistantMessageEvent, AssistantRole, Context,
         ConversationMessage, FauxProvider, FauxResponse, InputType, Model, ModelCost,
@@ -627,12 +641,14 @@ mod tests {
             "echo",
             arguments(serde_json::json!({ "text": "hi" })),
         );
-        let results = agent.execute_tool_calls(&message, &mut |_| {});
+        let (results, terminate) = agent.execute_tool_calls(&message, &mut |_| {});
 
         assert_eq!(results.len(), 1);
         assert!(!results[0].is_error);
         assert_eq!(results[0].tool_call_id, "call_1");
         assert_eq!(results[0].tool_name, "echo");
+        // echo 工具不要求终止。
+        assert!(!terminate);
         // 结果消息也被追加进了对话记录。
         assert_eq!(agent.messages().len(), 1);
         assert!(matches!(
@@ -650,7 +666,7 @@ mod tests {
         let mut agent = Agent::new(Box::new(FauxProvider::new(vec![])), faux_model());
 
         let message = tool_call_message("call_1", "missing", Map::new());
-        let results = agent.execute_tool_calls(&message, &mut |_| {});
+        let (results, _) = agent.execute_tool_calls(&message, &mut |_| {});
 
         assert_eq!(results.len(), 1);
         assert!(results[0].is_error);
@@ -759,6 +775,50 @@ mod tests {
             agent.run(&mut |_| {}),
             Err(AgentError::MaxTurnsExceeded { .. })
         ));
+    }
+
+    /// 一个总是要求终止的工具。
+    struct TerminateTool;
+
+    impl AgentTool for TerminateTool {
+        fn name(&self) -> &str {
+            "terminate"
+        }
+
+        fn description(&self) -> &str {
+            "终止对话循环"
+        }
+
+        fn parameters(&self) -> Value {
+            serde_json::json!({ "type": "object", "properties": {} })
+        }
+
+        fn execute(&self, _call: &ToolCall) -> Result<ToolResult, ToolError> {
+            let mut result = ToolResult::text("已终止");
+            result.terminate = true;
+            Ok(result)
+        }
+    }
+
+    #[test]
+    fn run_terminates_when_tool_requests_it() {
+        // 脚本：先调用 terminate 工具，然后（永远到不了的）文本回复。
+        // 如果终止不生效，第二个响应也会被消费；终止生效时循环停在第一轮。
+        let script = vec![
+            FauxResponse::tool_call("call_1", "terminate", Map::new()),
+            FauxResponse::Text("不该被请求".to_owned()),
+        ];
+        let provider = FauxProvider::with_script(vec![faux_model()], script);
+        let mut agent = Agent::new(Box::new(provider), faux_model());
+        agent.add_tool(Box::new(TerminateTool));
+        agent.add_message(user_message("stop now"));
+
+        let final_message = agent.run(&mut |_| {}).unwrap();
+
+        // 循环在工具轮后终止：最终消息就是带工具调用的那条助手消息。
+        assert_eq!(final_message.stop_reason, StopReason::ToolUse);
+        // 消息序列：用户 -> 助手(工具调用) -> 工具结果。没有第二条助手回复。
+        assert_eq!(agent.messages().len(), 3);
     }
 
     #[test]

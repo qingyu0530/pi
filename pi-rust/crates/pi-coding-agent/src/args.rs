@@ -27,10 +27,24 @@ pub struct Args {
     pub print: bool,
     pub list_models: Option<ListModels>,
     pub thinking: Option<String>,
+    /// 工具白名单（逗号分隔）；`None` 表示不限制。
+    pub tools: Option<Vec<String>>,
+    /// 工具黑名单（逗号分隔）。
+    pub exclude_tools: Option<Vec<String>>,
     pub help: bool,
     pub version: bool,
     /// 位置参数：要发给模型的初始消息。
     pub messages: Vec<String>,
+}
+
+/// 解析逗号分隔的工具名列表，去掉空白项。
+fn parse_tool_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// 解析命令行参数（不含程序名）。
@@ -74,6 +88,14 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
                 result.session_dir = Some(take_value(args, &mut index, "--session-dir")?);
             }
             "--thinking" => result.thinking = Some(take_value(args, &mut index, "--thinking")?),
+            "--tools" | "-t" => {
+                let value = take_value(args, &mut index, "--tools")?;
+                result.tools = Some(parse_tool_list(&value));
+            }
+            "--exclude-tools" | "-xt" => {
+                let value = take_value(args, &mut index, "--exclude-tools")?;
+                result.exclude_tools = Some(parse_tool_list(&value));
+            }
             other if other.starts_with('-') => return Err(format!("未知选项: {other}")),
             other => result.messages.push(other.to_owned()),
         }
@@ -106,6 +128,8 @@ pub fn help_text() -> String {
   --api-key <key>          API Key（默认读 OPENAI_API_KEY）
   --system-prompt <text>   系统提示
   --thinking <level>       思考级别: off, minimal, low, medium, high, xhigh, max
+  --tools, -t <tools>      工具白名单（逗号分隔），只启用列出的工具
+  --exclude-tools, -xt <tools> 工具黑名单（逗号分隔），禁用列出的工具
   --session <path>         会话文件（默认 pi-session.jsonl，或环境变量 PI_SESSION）
   --session-dir <dir>      会话目录（默认 pi-sessions，或环境变量 PI_SESSION_DIR）
   --continue, -c           继续最近一次会话
@@ -186,6 +210,28 @@ mod tests {
         assert_eq!(args.session_dir.as_deref(), Some("s"));
 
         assert!(parse(&["-r"]).resume);
+    }
+
+    #[test]
+    fn parses_tool_filters() {
+        let args = parse(&["--tools", "read, grep ,ls"]);
+        assert_eq!(
+            args.tools,
+            Some(vec!["read".to_owned(), "grep".to_owned(), "ls".to_owned()])
+        );
+
+        let args = parse(&["-xt", "bash,edit"]);
+        assert_eq!(
+            args.exclude_tools,
+            Some(vec!["bash".to_owned(), "edit".to_owned()])
+        );
+
+        // 空白项被过滤。
+        let args = parse(&["--tools", " read , , , write "]);
+        assert_eq!(
+            args.tools,
+            Some(vec!["read".to_owned(), "write".to_owned()])
+        );
     }
 
     #[test]

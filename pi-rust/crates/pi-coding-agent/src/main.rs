@@ -71,14 +71,42 @@ fn faux_agent(scripted: bool) -> (Agent, String) {
 }
 
 /// 给 Agent 注册内置工具。
-fn register_tools(agent: &mut Agent) {
-    agent.add_tool(Box::new(ReadTool::new(Box::new(RealEnvironment))));
-    agent.add_tool(Box::new(WriteTool::new(Box::new(RealEnvironment))));
-    agent.add_tool(Box::new(EditTool::new(Box::new(RealEnvironment))));
-    agent.add_tool(Box::new(LsTool::new(Box::new(RealEnvironment))));
-    agent.add_tool(Box::new(FindTool::new(Box::new(RealEnvironment))));
-    agent.add_tool(Box::new(GrepTool::new(Box::new(RealEnvironment))));
-    agent.add_tool(Box::new(BashTool::new(Box::new(RealShell))));
+/// 给 Agent 注册内置工具，并按 `--tools` / `--exclude-tools` 过滤。
+///
+/// - `--tools a,b`：白名单，只注册列出的工具；
+/// - `--exclude-tools a,b`：黑名单，从默认集合里去掉列出的工具；
+/// - 两者都给时先套白名单再套黑名单。
+fn register_tools(agent: &mut Agent, args: &Args) {
+    let mut tools: Vec<Box<dyn pi_agent_core::AgentTool>> = vec![
+        Box::new(ReadTool::new(Box::new(RealEnvironment))),
+        Box::new(WriteTool::new(Box::new(RealEnvironment))),
+        Box::new(EditTool::new(Box::new(RealEnvironment))),
+        Box::new(LsTool::new(Box::new(RealEnvironment))),
+        Box::new(FindTool::new(Box::new(RealEnvironment))),
+        Box::new(GrepTool::new(Box::new(RealEnvironment))),
+        Box::new(BashTool::new(Box::new(RealShell))),
+    ];
+
+    if let Some(allow) = &args.tools {
+        tools.retain(|tool| allow.iter().any(|name| tool.name() == name));
+    }
+    if let Some(deny) = &args.exclude_tools {
+        tools.retain(|tool| !deny.iter().any(|name| tool.name() == name));
+    }
+
+    if let Some(allow) = &args.tools {
+        // 白名单里点名但不存在的工具，提示一下（避免静默拼错名字）。
+        let known: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
+        for name in allow {
+            if !known.contains(&name.as_str()) {
+                eprintln!("未知或被排除的工具: {name}");
+            }
+        }
+    }
+
+    for tool in tools {
+        agent.add_tool(tool);
+    }
 }
 
 /// 根据命令行参数、环境变量与内置模型目录创建 Agent。
@@ -200,7 +228,7 @@ impl Cli {
             agent = agent.with_system_prompt(prompt.clone());
         }
 
-        register_tools(&mut agent);
+        register_tools(&mut agent, args);
         // 把已保存的历史消息回放进 Agent。
         for message in session.messages() {
             agent.add_message(message);
