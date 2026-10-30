@@ -65,3 +65,4 @@ pub use api::openai_compat::{
     resolve_openai_completions_compat,
 };
 pub use api::openai_completions::{OpenAiCompletionsProvider, aggregate_sse};
+pub use api::openai_responses::{OpenAiResponsesProvider, ResponsesStream, ResponsesStreamEvent};

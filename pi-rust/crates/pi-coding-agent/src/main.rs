@@ -6,8 +6,9 @@ use pi_agent_core::{
 };
 use pi_ai::{
     AnthropicMessagesProvider, FauxProvider, FauxResponse, InputType, Model, ModelCost,
-    ModelCostRates, ModelRegistry, ModelThinkingLevel, OpenAiCompletionsProvider, Provider,
-    RequestOptions, StopReason, UreqTransport, UserMessage, UserMessageContent, UserRole,
+    ModelCostRates, ModelRegistry, ModelThinkingLevel, OpenAiCompletionsProvider,
+    OpenAiResponsesProvider, Provider, RequestOptions, StopReason, UreqTransport, UserMessage,
+    UserMessageContent, UserRole,
 };
 use pi_tui::{EventRenderer, PlainRenderer, Renderer};
 
@@ -112,7 +113,7 @@ fn build_agent(args: &Args) -> (Agent, String) {
     // api 决定从哪个环境变量取密钥；不支持的 api 在这里就退出，
     // 而不是把请求发出去之后才失败。
     let key_env = match model.api.as_str() {
-        "openai-completions" => "OPENAI_API_KEY",
+        "openai-completions" | "openai-responses" => "OPENAI_API_KEY",
         "anthropic-messages" => "ANTHROPIC_API_KEY",
         other => {
             eprintln!("暂不支持的 api: {other}，使用 FauxProvider 演示。");
@@ -128,16 +129,19 @@ fn build_agent(args: &Args) -> (Agent, String) {
     };
 
     // 同一个 Box<dyn Provider> 里装不同的协议实现：调用方（Agent）不需要知道区别。  Provider 分派
-    let provider: Box<dyn Provider> = if model.api == "anthropic-messages" {
-        Box::new(AnthropicMessagesProvider::new(
+    let provider: Box<dyn Provider> = match model.api.as_str() {
+        "anthropic-messages" => Box::new(AnthropicMessagesProvider::new(
             Box::new(UreqTransport::new()),
             api_key,
-        ))
-    } else {
-        Box::new(OpenAiCompletionsProvider::new(
+        )),
+        "openai-responses" => Box::new(OpenAiResponsesProvider::new(
             Box::new(UreqTransport::new()),
             api_key,
-        ))
+        )),
+        _ => Box::new(OpenAiCompletionsProvider::new(
+            Box::new(UreqTransport::new()),
+            api_key,
+        )),
     };
 
     (
