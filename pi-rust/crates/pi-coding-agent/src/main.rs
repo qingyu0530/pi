@@ -12,8 +12,11 @@ use pi_ai::{
 };
 use pi_tui::{EventRenderer, PlainRenderer, Renderer};
 
+mod api_keys;
 mod args;
+mod context_files;
 mod session_store;
+mod system_prompt;
 
 use args::{Args, ListModels, help_text, parse_args};
 use session_store::{DEFAULT_SESSION_DIR, most_recent_session, new_session_path};
@@ -113,8 +116,8 @@ fn register_tools(agent: &mut Agent, args: &Args) {
 ///
 /// 优先级：命令行参数 > 环境变量 > 默认值。
 /// - `--provider` / `PI_PROVIDER`、`--model` / `PI_MODEL` 选择模型（默认 openai/gpt-4o-mini）。
-/// - `--api-key`，或按模型 api 对应的环境变量提供密钥：
-///   `openai-completions` 用 `OPENAI_API_KEY`，`anthropic-messages` 用 `ANTHROPIC_API_KEY`。
+/// - `--api-key`，或按 provider 名对应的环境变量提供密钥
+///   （如 `DEEPSEEK_API_KEY`、`ZAI_API_KEY`，见 `api_keys.rs`）。
 ///
 /// 没有密钥、模型不存在、或 api 暂不支持时，回退 FauxProvider 演示。
 ///
@@ -138,15 +141,19 @@ fn build_agent(args: &Args) -> (Agent, String) {
         return faux_agent(false);
     };
 
-    // api 决定从哪个环境变量取密钥；不支持的 api 在这里就退出，
-    // 而不是把请求发出去之后才失败。
-    let key_env = match model.api.as_str() {
-        "openai-completions" | "openai-responses" => "OPENAI_API_KEY",
-        "anthropic-messages" => "ANTHROPIC_API_KEY",
-        other => {
-            eprintln!("暂不支持的 api: {other}，使用 FauxProvider 演示。");
-            return faux_agent(false);
-        }
+    // 密钥环境变量：先按 provider 名找专属变量（如 DEEPSEEK_API_KEY、ZAI_API_KEY，
+    // 移植自原版 env-api-keys.ts）；没有映射时按 api 回退（供自定义网关等情况）。
+    let api_fallback = match model.api.as_str() {
+        "openai-completions" | "openai-responses" => Some("OPENAI_API_KEY"),
+        "anthropic-messages" => Some("ANTHROPIC_API_KEY"),
+        _ => None,
+    };
+    let Some(key_env) = api_keys::api_key_env(&provider_name).or(api_fallback) else {
+        eprintln!(
+            "暂不支持的 api: {}（provider {provider_name}），使用 FauxProvider 演示。",
+            model.api
+        );
+        return faux_agent(false);
     };
 
     let api_key = args.api_key.clone().or_else(|| std::env::var(key_env).ok());
@@ -223,12 +230,32 @@ impl Cli {
             ..RequestOptions::default()
         });
 
-        // 系统提示。
-        if let Some(prompt) = &args.system_prompt {
-            agent = agent.with_system_prompt(prompt.clone());
-        }
-
         register_tools(&mut agent, args);
+
+        // 工作目录（路径统一成正斜杠由 build_system_prompt 处理）。
+        let cwd = std::env::current_dir()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        // 项目上下文（AGENTS.md / CLAUDE.md，`--no-context-files` 关闭）。
+        // 全局目录取不到时传空串，等价于只扫 cwd 祖先链。
+        let context_files = if args.no_context_files {
+            Vec::new()
+        } else {
+            let agent_dir = context_files::default_agent_dir().unwrap_or_default();
+            context_files::load_context_files(&env, &cwd, &agent_dir)
+        };
+
+        // 系统提示：`--system-prompt` 完全替换默认模板；未提供时用默认模板
+        // （身份 + 工具清单 + 准则 + 项目上下文 + 工作目录）。放在工具注册
+        // 之后，这样清单里能反映 `--tools` / `--exclude-tools` 过滤后的实际工具。
+        let prompt = system_prompt::build_system_prompt(
+            args.system_prompt.as_deref(),
+            &agent.tool_summaries(),
+            &context_files,
+            &cwd,
+        );
+        agent = agent.with_system_prompt(prompt);
         // 把已保存的历史消息回放进 Agent。
         for message in session.messages() {
             agent.add_message(message);

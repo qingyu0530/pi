@@ -103,6 +103,17 @@ impl Agent {
         self.tools.push(tool);
     }
 
+    /// 已注册工具的 `(名字, 描述)` 清单，供系统提示或 UI 使用。
+    ///
+    /// 借用而非克隆：名字和描述都借用自工具对象，生命周期跟着 `&self` 走。
+    #[must_use]
+    pub fn tool_summaries(&self) -> Vec<(&str, &str)> {
+        self.tools
+            .iter()
+            .map(|tool| (tool.name(), tool.description()))
+            .collect()
+    }
+
     /// 追加一条消息到对话记录。
     pub fn add_message(&mut self, message: impl Into<ConversationMessage>) {
         self.messages.push(message.into());
@@ -869,5 +880,22 @@ mod tests {
         assert!(matches!(messages[0], ConversationMessage::User(_)));
         assert!(matches!(messages[1], ConversationMessage::Assistant(_)));
         assert!(matches!(messages[2], ConversationMessage::ToolResult(_)));
+    }
+
+    #[test]
+    fn tool_summaries_lists_registered_tools() {
+        let mut agent = Agent::new(Box::new(FauxProvider::new(vec![])), faux_model());
+        assert!(agent.tool_summaries().is_empty());
+
+        agent.add_tool(Box::new(super::EchoTool));
+        agent.add_tool(Box::new(TerminateTool));
+
+        assert_eq!(
+            agent.tool_summaries(),
+            vec![
+                ("echo", "回显参数中的 text 字段"),
+                ("terminate", "终止对话循环"),
+            ]
+        );
     }
 }

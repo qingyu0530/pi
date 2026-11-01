@@ -31,6 +31,8 @@ pub struct Args {
     pub tools: Option<Vec<String>>,
     /// 工具黑名单（逗号分隔）。
     pub exclude_tools: Option<Vec<String>>,
+    /// 不发现、不加载 AGENTS.md / CLAUDE.md 项目上下文。
+    pub no_context_files: bool,
     pub help: bool,
     pub version: bool,
     /// 位置参数：要发给模型的初始消息。
@@ -65,6 +67,7 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
             "--version" | "-v" => result.version = true,
             "--print" | "-p" => result.print = true,
             "--no-session" => result.no_session = true,
+            "--no-context-files" | "-nc" => result.no_context_files = true,
             "--continue" | "-c" => result.continue_session = true,
             "--resume" | "-r" => result.resume = true,
             "--list-models" => {
@@ -135,6 +138,7 @@ pub fn help_text() -> String {
   --continue, -c           继续最近一次会话
   --resume, -r             恢复最近一次会话
   --no-session             不保存会话
+  --no-context-files, -nc  不加载 AGENTS.md / CLAUDE.md 项目上下文
   --print, -p              非交互：处理消息后退出
   --list-models [search]   列出可用模型（可选子串过滤）
   --help, -h               显示帮助
@@ -242,5 +246,12 @@ mod tests {
         assert!(args.version);
         assert!(args.no_session);
         assert_eq!(args.thinking.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn parses_no_context_files() {
+        assert!(parse(&["--no-context-files"]).no_context_files);
+        assert!(parse(&["-nc"]).no_context_files);
+        assert!(!parse(&["-p", "hi"]).no_context_files);
     }
 }
