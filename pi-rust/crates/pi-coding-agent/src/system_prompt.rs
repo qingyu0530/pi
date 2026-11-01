@@ -57,13 +57,25 @@ pub fn build_system_prompt(
         tools.iter().map(tool_line).collect::<Vec<_>>().join("\n")
     };
 
-    // 准则：只有 bash 而没有 grep/find/ls 时，引导模型用 shell 做文件操作；
-    // 有专用搜索工具时不需要这条。
+    // 准则：只有 shell 工具而没有 grep/find/ls 时，引导模型用 shell 做文件操作；
+    // 有专用搜索工具时不需要这条。bash 与 powershell 并存时两者都可推荐
+    // （对齐原版 buildSystemPrompt 的三态规则）。
     let names: Vec<&str> = tools.iter().map(|(name, _)| *name).collect();
     let has = |name: &str| names.contains(&name);
     let mut guidelines: Vec<&str> = Vec::new();
-    if has("bash") && !has("grep") && !has("find") && !has("ls") {
-        guidelines.push("Use bash for file operations like ls, rg, find");
+    let has_bash = has("bash");
+    let has_powershell = has("powershell");
+    if (has_bash || has_powershell) && !has("grep") && !has("find") && !has("ls") {
+        if has_bash && has_powershell {
+            guidelines
+                .push("Use bash or PowerShell for file operations like listing, searching, and finding files");
+        } else if has_powershell {
+            guidelines.push(
+                "Use PowerShell for file operations like listing, searching, and finding files",
+            );
+        } else {
+            guidelines.push("Use bash for file operations like ls, rg, find");
+        }
     }
     guidelines.push("Be concise in your responses");
     guidelines.push("Show file paths clearly when working with files");
@@ -125,6 +137,27 @@ mod tests {
         let prompt = build_system_prompt(None, &tools, &[], "/tmp");
 
         assert!(prompt.contains("Use bash for file operations like ls, rg, find"));
+    }
+
+    #[test]
+    fn bash_and_powershell_get_combined_guideline() {
+        let tools = vec![
+            ("read", "读取"),
+            ("bash", "执行命令"),
+            ("powershell", "执行 PowerShell"),
+        ];
+        let prompt = build_system_prompt(None, &tools, &[], "/tmp");
+
+        assert!(prompt.contains("Use bash or PowerShell for file operations"));
+        assert!(!prompt.contains("Use bash for file operations like ls"));
+    }
+
+    #[test]
+    fn powershell_only_tools_get_powershell_guideline() {
+        let tools = vec![("read", "读取"), ("powershell", "执行 PowerShell")];
+        let prompt = build_system_prompt(None, &tools, &[], "/tmp");
+
+        assert!(prompt.contains("Use PowerShell for file operations"));
     }
 
     #[test]

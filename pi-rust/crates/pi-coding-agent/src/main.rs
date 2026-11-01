@@ -4,6 +4,8 @@ use pi_agent_core::{
     Agent, BashTool, DEFAULT_COMPACTION_SETTINGS, EditTool, Environment, FindTool, GrepTool,
     LsTool, ReadTool, RealEnvironment, RealShell, Session, WriteTool,
 };
+#[cfg(windows)]
+use pi_agent_core::{PowerShellShell, PowerShellTool};
 use pi_ai::{
     AnthropicMessagesProvider, FauxProvider, FauxResponse, InputType, Model, ModelCost,
     ModelCostRates, ModelRegistry, ModelThinkingLevel, OpenAiCompletionsProvider,
@@ -89,6 +91,10 @@ fn register_tools(agent: &mut Agent, args: &Args) {
         Box::new(GrepTool::new(Box::new(RealEnvironment))),
         Box::new(BashTool::new(Box::new(RealShell))),
     ];
+
+    // Windows 上按原版默认集追加 powershell（与 bash 并存，模型按需自选）。
+    #[cfg(windows)]
+    tools.push(Box::new(PowerShellTool::new(Box::new(PowerShellShell))));
 
     if let Some(allow) = &args.tools {
         tools.retain(|tool| allow.iter().any(|name| tool.name() == name));

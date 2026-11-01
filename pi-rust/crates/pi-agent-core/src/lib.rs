@@ -25,9 +25,11 @@ pub use compaction::{
 pub use environment::{DirEntry, EnvError, Environment, RealEnvironment};
 pub use event::AgentEvent;
 pub use session::{Entry, Session, SessionError};
-pub use shell::{RealShell, Shell, ShellError, ShellOutput};
+pub use shell::{PowerShellShell, RealShell, Shell, ShellError, ShellOutput};
 pub use tool::{AgentTool, EchoTool, ToolError, ToolResult};
-pub use tools::{BashTool, EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool};
+pub use tools::{
+    BashTool, EditTool, FindTool, GrepTool, LsTool, PowerShellTool, ReadTool, WriteTool,
+};
 
 use pi_ai::{
     AssistantContent, AssistantMessage, AssistantMessageEvent, Context, ConversationMessage, Model,
