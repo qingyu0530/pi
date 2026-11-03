@@ -140,6 +140,11 @@ impl Agent {
         self.messages.push(message.into());
     }
 
+    /// 用一份新历史**整体替换**对话记录（切换会话分支时重放那条分支的历史）。
+    pub fn replace_messages(&mut self, messages: Vec<ConversationMessage>) {
+        self.messages = messages;
+    }
+
     /// 只读访问完整对话记录。
     #[must_use]
     pub fn messages(&self) -> &[ConversationMessage] {

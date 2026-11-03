@@ -441,9 +441,88 @@ impl Cli {
             if input == "exit" || input == "quit" {
                 break;
             }
+            // 会话分支命令。
+            if let Some(name) = input.strip_prefix("/branch") {
+                self.handle_branch(name.trim())?;
+                continue;
+            }
+            if let Some(name) = input.strip_prefix("/switch") {
+                self.handle_switch(name.trim())?;
+                continue;
+            }
+            if input == "/lanes" {
+                self.handle_lanes();
+                continue;
+            }
             self.run_turn(input.to_owned())?;
         }
         Ok(())
+    }
+
+    /// `/branch <name>`：从当前叶开新分支并切换过去。
+    fn handle_branch(&mut self, name: &str) -> io::Result<()> {
+        if name.is_empty() {
+            eprintln!("用法: /branch <name>");
+            return Ok(());
+        }
+        let leaf = self.session.leaf_id().map(str::to_owned);
+        self.session
+            .create_lane(name, leaf.as_deref())
+            .map_err(|error| io::Error::other(error.message))?;
+        // 创建即切换：后续对话追加到新分支。
+        self.session
+            .switch_lane(name)
+            .map_err(|error| io::Error::other(error.message))?;
+        eprintln!("已创建并切换到分支 {name}");
+        // 分支指针记录立即落盘。
+        self.flush_session()?;
+        self.replay_active_lane();
+        Ok(())
+    }
+
+    /// `/switch <name>`：切换到已有分支。
+    fn handle_switch(&mut self, name: &str) -> io::Result<()> {
+        if name.is_empty() {
+            eprintln!("用法: /switch <name>");
+            return Ok(());
+        }
+        self.session
+            .switch_lane(name)
+            .map_err(|error| io::Error::other(error.message))?;
+        eprintln!("已切换到分支 {name}");
+        self.replay_active_lane();
+        Ok(())
+    }
+
+    /// `/lanes`：列出所有分支。
+    fn handle_lanes(&self) {
+        let active = self.session.active_lane();
+        for (name, leaf) in self.session.lanes() {
+            let marker = if name == active { "*" } else { " " };
+            let count = self.session.lane_messages(name).len();
+            println!(
+                "{marker} {name}: {count} 条消息（叶: {}）",
+                leaf.as_deref().unwrap_or("-")
+            );
+        }
+    }
+
+    /// 把活动分支的历史重放进 Agent，并同步持久化水位。
+    fn replay_active_lane(&mut self) {
+        let messages = self.session.messages();
+        self.agent.replace_messages(messages);
+        // 这些消息已在会话文件里，标记为已持久化。
+        self.persisted_messages = self.agent.messages().len();
+    }
+
+    /// 立即把会话里未落盘的记录（如分支指针）写进文件。
+    fn flush_session(&mut self) -> io::Result<()> {
+        if !self.persist_session {
+            return Ok(());
+        }
+        self.session
+            .append_new(&self.env, &self.session_path)
+            .map_err(|error| io::Error::other(format!("保存会话失败: {}", error.message)))
     }
 }
 

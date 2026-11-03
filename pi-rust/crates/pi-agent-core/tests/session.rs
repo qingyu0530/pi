@@ -128,6 +128,7 @@ fn entry_uses_expected_wire_shape() {
         seq: 0,
         parent_id: None,
         timestamp: 123,
+        lane: None,
         message: user("hi"),
     };
 
@@ -250,4 +251,106 @@ fn entry_lookup_by_id() {
     let id = session.leaf_id().unwrap().to_owned();
     assert!(session.entry(&id).is_some());
     assert!(session.entry("missing").is_none());
+}
+
+#[test]
+fn branch_isolates_messages_from_main() {
+    let mut session = Session::new();
+    session.push_message(user("a"));
+    session.push_message(user("b"));
+
+    // 从当前叶（b）分出 dev 分支并切换。
+    let leaf = session.leaf_id().map(str::to_owned);
+    session.create_lane("dev", leaf.as_deref()).unwrap();
+    session.switch_lane("dev").unwrap();
+    session.push_message(user("c"));
+
+    // main 链：a, b；dev 链：a, b, c。
+    assert_eq!(
+        session.lane_messages("main").len(),
+        2,
+        "main 不受 dev 追加影响"
+    );
+    assert_eq!(session.lane_messages("dev").len(), 3);
+    // 活动分支是 dev，messages() 取 dev 的。
+    assert_eq!(session.messages().len(), 3);
+    assert_eq!(session.active_lane(), "dev");
+}
+
+#[test]
+fn create_lane_from_specific_entry_branches_there() {
+    let mut session = Session::new();
+    session.push_message(user("a"));
+    session.push_message(user("b"));
+    let a_id = session.entries()[0].id().to_owned();
+
+    session.create_lane("dev", Some(&a_id)).unwrap();
+    session.switch_lane("dev").unwrap();
+    session.push_message(user("c"));
+
+    // dev 链从 a 分叉：a, c（不含 b）。
+    let dev = session.lane_messages("dev");
+    assert_eq!(dev.len(), 2);
+    assert_eq!(session.lane_messages("main").len(), 2);
+}
+
+#[test]
+fn lanes_round_trip_through_jsonl() {
+    let mut session = Session::new();
+    session.push_message(user("a"));
+    session.push_message(user("b"));
+    let a_id = session.entries()[0].id().to_owned();
+    session.create_lane("dev", Some(&a_id)).unwrap();
+    session.switch_lane("dev").unwrap();
+    session.push_message(user("c"));
+
+    let jsonl = session.to_jsonl().unwrap();
+    let restored = Session::from_jsonl(&jsonl).unwrap();
+
+    // 分支指针表完整恢复。
+    assert_eq!(restored.lanes().len(), 2);
+    // 重放后默认活动分支是 main。
+    assert_eq!(restored.active_lane(), "main");
+    assert_eq!(restored.lane_messages("main").len(), 2);
+    assert_eq!(restored.lane_messages("dev").len(), 2);
+
+    // 切回 dev 后继续追加，链不断。
+    let mut restored = restored;
+    restored.switch_lane("dev").unwrap();
+    restored.push_message(user("d"));
+    assert_eq!(restored.lane_messages("dev").len(), 3);
+}
+
+#[test]
+fn lane_errors_are_reported() {
+    let mut session = Session::new();
+
+    // 重复分支名。
+    assert!(session.create_lane("main", None).is_err());
+    // 不存在的分叉点。
+    assert!(session.create_lane("dev", Some("nope")).is_err());
+    // 切到不存在的分支。
+    assert!(session.switch_lane("dev").is_err());
+}
+
+#[test]
+fn lane_record_is_persisted_by_append_new() {
+    let env = FakeEnv::default();
+    let mut session = Session::new();
+    session.push_message(user("a"));
+
+    let a_id = session.entries()[0].id().to_owned();
+    session.create_lane("dev", Some(&a_id)).unwrap();
+    session.append_new(&env, "s.jsonl").unwrap();
+
+    // Lane 记录也写进了文件。
+    let text = env.read_file("s.jsonl").unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2);
+    assert!(lines[1].contains("\"type\":\"lane\""));
+    assert!(lines[1].contains("\"lane\":\"dev\""));
+
+    // 读回后分支指针恢复。
+    let restored = Session::load(&env, "s.jsonl").unwrap();
+    assert!(restored.lanes().contains_key("dev"));
 }
