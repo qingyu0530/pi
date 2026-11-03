@@ -2,7 +2,7 @@ use std::io::{self, Write};
 
 use pi_agent_core::{
     Agent, BashTool, DEFAULT_COMPACTION_SETTINGS, EditTool, Environment, FindTool, GrepTool,
-    LsTool, ReadTool, RealEnvironment, RealShell, Session, WriteTool,
+    LsTool, ReadTool, RealEnvironment, RealShell, Session, ToolApprover, WriteTool,
 };
 #[cfg(windows)]
 use pi_agent_core::{PowerShellShell, PowerShellTool};
@@ -25,6 +25,61 @@ use session_store::{DEFAULT_SESSION_DIR, most_recent_session, new_session_path};
 
 /// 默认的会话文件（可用 `--session` 或 `PI_SESSION` 覆盖）。
 const DEFAULT_SESSION_FILE: &str = "pi-session.jsonl";
+
+/// 需要用户确认的危险工具名（写文件 / 改文件 / 执行命令）。
+const DANGEROUS_TOOLS: [&str; 4] = ["write", "edit", "bash", "powershell"];
+
+/// 构造工具审批钩子。
+///
+/// - `--yes`：全部放行；
+/// - 交互模式：危险工具逐个问 y/N；
+/// - `-p` 非交互且无 `--yes`：危险工具默认拒绝。
+///
+/// 只读工具（read/ls/find/grep）不需要确认。
+fn build_tool_approver(args: &Args) -> ToolApprover {
+    let auto_yes = args.yes;
+    let interactive = !args.print;
+    Box::new(move |call| {
+        if !DANGEROUS_TOOLS.contains(&call.name.as_str()) {
+            return Ok(());
+        }
+        if auto_yes {
+            return Ok(());
+        }
+        if !interactive {
+            return Err(format!(
+                "非交互模式拒绝执行 {name}（加 --yes 允许）",
+                name = call.name
+            ));
+        }
+        // 交互式：显示工具名和关键参数（path 或 command），问一次。
+        let detail = call
+            .arguments
+            .get("path")
+            .or_else(|| call.arguments.get("command"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_default();
+        print!("允许执行 {name} {detail}? [y/N] ", name = call.name);
+        let _ = io::stdout().flush();
+        let mut line = String::new();
+        match io::stdin().read_line(&mut line) {
+            Ok(0) => {
+                return Err(format!("已拒绝执行 {name}（输入结束）", name = call.name));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                return Err(format!("读取确认输入失败: {error}"));
+            }
+        }
+        let answer = line.trim().to_lowercase();
+        if answer == "y" || answer == "yes" {
+            Ok(())
+        } else {
+            Err(format!("用户拒绝了 {name} 的执行", name = call.name))
+        }
+    })
+}
 
 /// 演示用的极简模型（没有真实 API Key 时走 Faux）。
 fn demo_model() -> Model {
@@ -237,6 +292,8 @@ impl Cli {
         });
 
         register_tools(&mut agent, args);
+        // 工具审批：write/edit/bash 执行前确认（--yes 跳过，-p 默认拒绝）。
+        agent = agent.with_tool_approver(build_tool_approver(args));
 
         // 工作目录（路径统一成正斜杠由 build_system_prompt 处理）。
         let cwd = std::env::current_dir()

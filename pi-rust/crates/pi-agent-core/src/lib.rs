@@ -63,6 +63,10 @@ pub enum AgentError {
 ///
 /// C++ 对照：`Box<dyn Provider>` 类似 `std::unique_ptr<Provider>`，
 /// 其中 `Provider` 是抽象基类；`Box` 表示独占所有权。
+/// 工具执行前的审批钩子：返回 `Err(原因)` 表示拒绝执行。
+pub type ToolApprover = Box<dyn FnMut(&ToolCall) -> Result<(), String>>;
+
+/// 一次 Agent 会话的状态与行为。  Agent 结构体
 pub struct Agent {
     provider: Box<dyn Provider>,
     model: Model,
@@ -70,6 +74,9 @@ pub struct Agent {
     tools: Vec<Box<dyn AgentTool>>,
     messages: Vec<ConversationMessage>,
     options: RequestOptions,
+    /// 工具执行前的审批钩子；返回 Err(原因) 表示拒绝执行。
+    /// 对应原版 AgentLoopConfig.beforeToolCall 的 block 分支。
+    tool_approver: Option<ToolApprover>,
 }
 
 impl Agent {
@@ -83,7 +90,19 @@ impl Agent {
             tools: Vec::new(),
             messages: Vec::new(),
             options: RequestOptions::default(),
+            tool_approver: None,
         }
+    }
+
+    /// 设置工具执行前的审批钩子（链式写法）。
+    ///
+    /// 钩子在每个工具执行前调用；返回 `Err(原因)` 表示拒绝：
+    /// 工具不执行，改产出一条 `is_error = true` 的错误结果（模型能看到原因并调整）。
+    /// 对应原版 `beforeToolCall` 的 `{ block: true, reason }` 分支。
+    #[must_use]
+    pub fn with_tool_approver(mut self, approver: ToolApprover) -> Self {
+        self.tool_approver = Some(approver);
+        self
     }
 
     /// 设置系统提示（链式写法，方便创建时一次写完）。
@@ -300,9 +319,15 @@ impl Agent {
 
     /// 执行单个工具调用，返回工具结果和是否失败。
     ///
-    /// 工具不存在或执行失败时返回一条错误文本结果，而不是中断整个流程，
+    /// 先过审批钩子：拒绝时返回错误结果（工具不执行）。
+    /// 工具不存在或执行失败时也返回错误文本结果，而不是中断整个流程，
     /// 这样模型能看到错误并自行调整。
-    fn execute_one(&self, call: &ToolCall) -> (ToolResult, bool) {
+    fn execute_one(&mut self, call: &ToolCall) -> (ToolResult, bool) {
+        if let Some(approver) = self.tool_approver.as_mut() {
+            if let Err(reason) = approver(call) {
+                return (ToolResult::text(reason), true);
+            }
+        }
         match self.find_tool(&call.name) {
             Some(tool) => match tool.execute(call) {
                 Ok(result) => (result, false),
@@ -810,6 +835,82 @@ mod tests {
             let mut result = ToolResult::text("已终止");
             result.terminate = true;
             Ok(result)
+        }
+    }
+
+    #[test]
+    fn approver_block_prevents_execution_and_reports_reason() {
+        let mut agent = Agent::new(Box::new(FauxProvider::new(vec![])), faux_model());
+        agent.add_tool(Box::new(super::EchoTool));
+        // 审批钩子：拒绝一切工具调用。
+        agent = agent.with_tool_approver(Box::new(|call| {
+            Err(format!("已拒绝执行 {name}: 需要用户确认", name = call.name))
+        }));
+
+        let message = tool_call_message(
+            "call_1",
+            "echo",
+            arguments(serde_json::json!({ "text": "hi" })),
+        );
+        let (results, terminate) = agent.execute_tool_calls(&message, &mut |_| {});
+
+        // 工具没执行（echo 的结果不会出现），取而代之是错误结果。
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_error);
+        match &results[0].content[0] {
+            ToolResultContent::Text(text) => {
+                assert!(text.text.contains("已拒绝执行 echo"));
+            }
+            other => panic!("expected text content, got {other:?}"),
+        }
+        // 拒绝不触发终止。
+        assert!(!terminate);
+    }
+
+    #[test]
+    fn approver_allow_lets_tool_execute() {
+        let mut agent = Agent::new(Box::new(FauxProvider::new(vec![])), faux_model());
+        agent.add_tool(Box::new(super::EchoTool));
+        agent = agent.with_tool_approver(Box::new(|_call| Ok(())));
+
+        let message = tool_call_message(
+            "call_1",
+            "echo",
+            arguments(serde_json::json!({ "text": "hi" })),
+        );
+        let (results, _) = agent.execute_tool_calls(&message, &mut |_| {});
+
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].is_error);
+        match &results[0].content[0] {
+            ToolResultContent::Text(text) => assert_eq!(text.text, "hi"),
+            other => panic!("expected text content, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_recovers_after_denied_tool_call() {
+        // 模型先要调用被拒绝的工具，看到错误后改用纯文本回答。
+        let script = vec![
+            FauxResponse::tool_call(
+                "call_1",
+                "echo",
+                arguments(serde_json::json!({ "text": "hi" })),
+            ),
+            FauxResponse::Text("改用文字回答".to_owned()),
+        ];
+        let provider = FauxProvider::with_script(vec![faux_model()], script);
+        let mut agent = Agent::new(Box::new(provider), faux_model());
+        agent.add_tool(Box::new(super::EchoTool));
+        agent = agent.with_tool_approver(Box::new(|call| Err(format!("已拒绝执行 {}", call.name))));
+        agent.add_message(user_message("echo hi"));
+
+        let final_message = agent.run(&mut |_| {}).unwrap();
+
+        // 循环没有终止：模型第二轮给出文本。
+        match &final_message.content[0] {
+            AssistantContent::Text(text) => assert_eq!(text.text, "改用文字回答"),
+            other => panic!("expected text, got {other:?}"),
         }
     }
 

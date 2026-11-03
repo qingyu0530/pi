@@ -25,6 +25,8 @@ pub struct Args {
     pub resume: bool,
     pub no_session: bool,
     pub print: bool,
+    /// 自动批准所有工具执行（跳过确认提示）。
+    pub yes: bool,
     pub list_models: Option<ListModels>,
     pub thinking: Option<String>,
     /// 工具白名单（逗号分隔）；`None` 表示不限制。
@@ -66,6 +68,7 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
             "--help" | "-h" => result.help = true,
             "--version" | "-v" => result.version = true,
             "--print" | "-p" => result.print = true,
+            "--yes" | "-y" => result.yes = true,
             "--no-session" => result.no_session = true,
             "--no-context-files" | "-nc" => result.no_context_files = true,
             "--continue" | "-c" => result.continue_session = true,
@@ -140,6 +143,7 @@ pub fn help_text() -> String {
   --no-session             不保存会话
   --no-context-files, -nc  不加载 AGENTS.md / CLAUDE.md 项目上下文
   --print, -p              非交互：处理消息后退出
+  --yes, -y                自动批准工具执行（write/edit/bash 等不再确认）
   --list-models [search]   列出可用模型（可选子串过滤）
   --help, -h               显示帮助
   --version, -v            显示版本
@@ -204,6 +208,13 @@ mod tests {
         let error = parse_args(&owned).unwrap_err();
 
         assert!(error.contains("未知选项"));
+    }
+
+    #[test]
+    fn parses_yes_flag() {
+        assert!(parse(&["-y"]).yes);
+        assert!(parse(&["--yes"]).yes);
+        assert!(!parse(&["-p"]).yes);
     }
 
     #[test]
