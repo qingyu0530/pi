@@ -6,7 +6,33 @@
 use std::io::{self, Write};
 
 use pi_agent_core::AgentEvent;
-use pi_ai::AssistantMessageEvent;
+use pi_ai::{AssistantMessageEvent, ToolResultContent};
+
+/// 工具结果预览：取第一个文本块，压成单行并截断。
+///
+/// 用户需要看到「工具干了什么」，但完整输出会刷屏；
+/// 模型仍然拿到完整结果，这里只是终端显示的裁剪。
+fn tool_result_preview(result: &pi_agent_core::ToolResult) -> Option<String> {
+    let text = result
+        .content
+        .iter()
+        .find_map(|block| match block {
+            ToolResultContent::Text(text) => Some(text.text.clone()),
+            ToolResultContent::Image(_) => None,
+        })
+        .or_else(|| result.details.as_ref().map(|_| String::new()))?;
+    if text.trim().is_empty() {
+        return None;
+    }
+    // 换行压成空格，保持单行；截到 120 个字符。
+    let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let preview: String = collapsed.chars().take(120).collect();
+    if collapsed.chars().count() > 120 {
+        Some(format!("{preview}…"))
+    } else {
+        Some(preview)
+    }
+}
 
 /// 把文本渲染到某个输出。
 /// 规定「渲染文本」的三个动作——增量写、整行写、刷新
@@ -84,12 +110,16 @@ impl EventRenderer {
             AgentEvent::ToolExecutionEnd {
                 tool_name,
                 is_error,
+                result,
                 ..
             } => {
                 self.end_line()?;
                 let status = if *is_error { "失败" } else { "完成" };
-                self.renderer
-                    .render_line(&format!("[工具 {tool_name} {status}]"))
+                let line = match tool_result_preview(result) {
+                    Some(preview) => format!("[工具 {tool_name} {status}] {preview}"),
+                    None => format!("[工具 {tool_name} {status}]"),
+                };
+                self.renderer.render_line(&line)
             }
             // 一条消息结束：若还停在半行，补一个换行。
             AgentEvent::MessageEnd { .. } => self.end_line(),
@@ -264,10 +294,58 @@ mod tests {
             })
             .unwrap();
 
+        // 工具完成行带结果预览。
         assert_eq!(
             *buffer.borrow(),
-            "开始\n[工具 read 开始]\n[工具 read 完成]\n"
+            "开始\n[工具 read 开始]\n[工具 read 完成] ok\n"
         );
+    }
+
+    #[test]
+    fn tool_result_preview_collapses_and_truncates() {
+        let (mut renderer, buffer) = setup();
+
+        // 多行输出压成单行。
+        let mut result = pi_agent_core::ToolResult::text("第一行\n第二行\n第三行");
+        renderer
+            .handle(&AgentEvent::ToolExecutionEnd {
+                tool_call_id: "c1".to_owned(),
+                tool_name: "bash".to_owned(),
+                result: Box::new(result.clone()),
+                is_error: false,
+            })
+            .unwrap();
+        assert!(
+            buffer
+                .borrow()
+                .contains("[工具 bash 完成] 第一行 第二行 第三行\n")
+        );
+
+        // 超长输出截断到 120 字符。
+        result = pi_agent_core::ToolResult::text("x".repeat(200));
+        renderer
+            .handle(&AgentEvent::ToolExecutionEnd {
+                tool_call_id: "c2".to_owned(),
+                tool_name: "bash".to_owned(),
+                result: Box::new(result),
+                is_error: false,
+            })
+            .unwrap();
+        let text = buffer.borrow().clone();
+        assert!(text.contains(&format!("[工具 bash 完成] {}…", "x".repeat(120))));
+
+        // 空结果不带预览。
+        let empty = pi_agent_core::ToolResult::text("");
+        let (mut renderer, buffer) = setup();
+        renderer
+            .handle(&AgentEvent::ToolExecutionEnd {
+                tool_call_id: "c3".to_owned(),
+                tool_name: "read".to_owned(),
+                result: Box::new(empty),
+                is_error: false,
+            })
+            .unwrap();
+        assert_eq!(*buffer.borrow(), "[工具 read 完成]\n");
     }
 
     #[test]

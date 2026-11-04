@@ -375,6 +375,22 @@ impl Cli {
                 "[本轮出错: {}]",
                 reply.error_message.as_deref().unwrap_or("未知错误")
             );
+        } else {
+            // 本轮用量与费用（Faux 演示时为 0，不显示）。
+            let usage = &reply.usage;
+            if usage.total_tokens > 0 {
+                eprintln!(
+                    "[tokens {} in {} out{} · {}]",
+                    format_tokens(usage.input + usage.cache_read),
+                    format_tokens(usage.output),
+                    if usage.cache_read > 0 {
+                        format!(" (含 {} 缓存)", format_tokens(usage.cache_read))
+                    } else {
+                        String::new()
+                    },
+                    format_cost(usage.cost.total)
+                );
+            }
         }
 
         self.persist()
@@ -446,6 +462,19 @@ impl Cli {
             }
             if input == "exit" || input == "quit" {
                 break;
+            }
+            if input == "/help" {
+                print_repl_help();
+                continue;
+            }
+            if input == "/model" {
+                println!(
+                    "模型 {} | 会话 {} | 分支 {}",
+                    self.model_label,
+                    self.session_path,
+                    self.session.active_lane()
+                );
+                continue;
             }
             // 会话分支命令。
             if let Some(name) = input.strip_prefix("/branch") {
@@ -533,6 +562,39 @@ impl Cli {
 }
 
 /// 把 `--thinking` 的字符串映射成思考级别。   把 --thinking 的字符串转成 ModelThinkingLevel；非法值返回错误。
+/// REPL 命令帮助。
+fn print_repl_help() {
+    println!("命令:");
+    println!("  /help              显示本帮助");
+    println!("  /model             当前模型与会话信息");
+    println!("  /branch <name>     从当前对话分叉新分支并切换");
+    println!("  /switch <name>     切换到已有分支");
+    println!("  /lanes             列出所有分支");
+    println!("  exit / quit        退出（Ctrl-D 也可）");
+}
+
+/// token 数量的人话格式：1.2k / 3.4M / 980。
+fn format_tokens(count: u64) -> String {
+    if count >= 1_000_000 {
+        format!("{:.1}M", count as f64 / 1_000_000.0)
+    } else if count >= 1_000 {
+        format!("{:.1}k", count as f64 / 1_000.0)
+    } else {
+        count.to_string()
+    }
+}
+
+/// 费用格式：低于 0.01 美元用更多小数位，避免显示成 $0.00。
+fn format_cost(cost: f64) -> String {
+    if cost >= 1.0 {
+        format!("${cost:.2}")
+    } else if cost >= 0.01 {
+        format!("${cost:.4}")
+    } else {
+        format!("${cost:.6}")
+    }
+}
+
 fn parse_thinking(level: &str) -> Result<ModelThinkingLevel, String> {
     match level {
         "off" => Ok(ModelThinkingLevel::Off),
@@ -642,7 +704,7 @@ fn main() -> io::Result<()> {
 
     let mut renderer = PlainRenderer;
     renderer.render_line(&format!(
-        "Pi Rust {} | 模型 {} | 会话 {} | 输入 exit 退出",
+        "Pi Rust {} | 模型 {} | 会话 {} | /help 查看命令",
         env!("CARGO_PKG_VERSION"),
         cli.model_label,
         cli.session_path
@@ -665,3 +727,22 @@ fn main() -> io::Result<()> {
 CLI 启动时回放历史，每轮只把新消息追加写盘。
 
 */
+
+#[cfg(test)]
+mod tests {
+    use super::{format_cost, format_tokens};
+
+    #[test]
+    fn formats_tokens_compactly() {
+        assert_eq!(format_tokens(980), "980");
+        assert_eq!(format_tokens(1_234), "1.2k");
+        assert_eq!(format_tokens(3_400_000), "3.4M");
+    }
+
+    #[test]
+    fn formats_cost_with_appropriate_precision() {
+        assert_eq!(format_cost(1.25), "$1.25");
+        assert_eq!(format_cost(0.0234), "$0.0234");
+        assert_eq!(format_cost(0.000123), "$0.000123");
+    }
+}
