@@ -15,6 +15,7 @@ license = "MIT"
 repository = "https://github.com/earendil-works/pi-mono"
 
 [workspace.dependencies]
+ctrlc = "=3.5.0"
 glob = "=0.3.4"
 regex = "=1.13.1"
 serde = { version = "=1.0.229", features = ["derive"] }

@@ -1,6 +1,7 @@
 //! Model and conversation types shared by Pi providers.
 // API 协议层：某个线上 API 的请求/响应 JSON 形状
 pub mod api;
+pub mod interrupt;
 // 声明 content 模块
 // 因此编译器会加载同一目录下的 content.rs
 mod content;
@@ -53,6 +54,8 @@ pub use model::{
 };
 pub use models::{ModelRegistry, RegistryError};
 pub use provider::{CacheRetention, FauxProvider, FauxResponse, Provider, RequestOptions};
+
+pub use interrupt::{clear, is_requested, request};
 
 // API 协议层与真实传输
 pub use api::anthropic_messages::{

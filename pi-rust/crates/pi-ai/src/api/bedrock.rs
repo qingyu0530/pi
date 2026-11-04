@@ -696,6 +696,14 @@ impl BedrockStream {
         }
     }
 
+    /// 标记流被用户中断；`finish` 会以 `Aborted` 收尾。
+    pub fn mark_aborted(&mut self) {
+        if self.stop_reason != StopReason::Aborted {
+            self.error_message = Some("已被用户中断".to_owned());
+            self.stop_reason = StopReason::Aborted;
+        }
+    }
+
     /// 处理一帧事件，返回产生的中间事件。
     pub fn handle_frame(&mut self, frame: &EventStreamFrame) -> Vec<AssistantMessageEvent> {
         let mut events = Vec::new();
@@ -1253,6 +1261,14 @@ impl Iterator for BedrockEventStream {
             }
             if self.finished {
                 return None;
+            }
+            // 用户按了 Ctrl+C：提前收尾（Aborted）。
+            if crate::interrupt::is_requested() {
+                self.stream.mark_aborted();
+                let events = self.stream.finish();
+                self.pending.extend(events);
+                self.finished = true;
+                continue;
             }
             match self.frames.next() {
                 None => {

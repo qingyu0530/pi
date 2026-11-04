@@ -345,6 +345,8 @@ impl Cli {
 
     /// 执行一轮对话并持久化。
     fn run_turn(&mut self, prompt: String) -> io::Result<()> {
+        // 每轮开始前清除上一轮可能残留的中断标志。
+        pi_ai::interrupt::clear();
         // 先检查上下文是否过长；需要时压缩后再开始本轮。
         self.compact_if_needed()?;
         // 之后才把用户消息加进去
@@ -370,7 +372,10 @@ impl Cli {
         }
         println!();
 
-        if reply.stop_reason == StopReason::Error {
+        // 流式中断的 stop_reason 是 Aborted；工具执行中中断时是 ToolUse，用标志位兜底。
+        if reply.stop_reason == StopReason::Aborted || pi_ai::interrupt::is_requested() {
+            eprintln!("[已中断]");
+        } else if reply.stop_reason == StopReason::Error {
             eprintln!(
                 "[本轮出错: {}]",
                 reply.error_message.as_deref().unwrap_or("未知错误")
@@ -570,6 +575,7 @@ fn print_repl_help() {
     println!("  /branch <name>     从当前对话分叉新分支并切换");
     println!("  /switch <name>     切换到已有分支");
     println!("  /lanes             列出所有分支");
+    println!("  Ctrl-C             中断当前回复（会话保留，提示符下用 exit 退出）");
     println!("  exit / quit        退出（Ctrl-D 也可）");
 }
 
@@ -676,6 +682,12 @@ fn print_models(filter: &ListModels) {
 }
 // 解析参数 → 处理 --help/--version/--list-models 这些「只打印」模式 → 否则建会话、跑初始消息、进入 REPL 或退出。
 fn main() -> io::Result<()> {
+    // Ctrl+C：置位全局中断标志（各流式迭代器与工具循环在安全点检查）。
+    // 注册失败时保持默认行为（进程被终止），对 CLI 而言同样可接受。
+    if ctrlc::set_handler(pi_ai::interrupt::request).is_err() {
+        eprintln!("警告: 无法注册 Ctrl+C 处理器，中断将直接退出进程。");
+    }
+
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let args = match parse_args(&raw) {
         Ok(args) => args,

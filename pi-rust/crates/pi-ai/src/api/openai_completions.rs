@@ -1557,6 +1557,14 @@ impl ChatCompletionStream {
         self.stop_reason = StopReason::Error;
     }
 
+    /// 标记流被用户中断；`finish` 会以 `Aborted` 收尾。
+    pub fn mark_aborted(&mut self) {
+        if self.stop_reason != StopReason::Aborted {
+            self.error_message = Some("已被用户中断".to_owned());
+            self.stop_reason = StopReason::Aborted;
+        }
+    }
+
     /// 收尾：为每个内容块发 end 事件，最后发 `done` 或 `error`。
     pub fn finish(&mut self) -> Vec<AssistantMessageEvent> {
         let mut events = Vec::new();
@@ -1692,6 +1700,14 @@ impl Iterator for ChatCompletionEventStream {
             }
             if self.finished {
                 return None;
+            }
+            // 用户按了 Ctrl+C：提前收尾（Aborted）。
+            if crate::interrupt::is_requested() {
+                self.stream.mark_aborted();
+                let events = self.stream.finish();
+                self.pending.extend(events);
+                self.finished = true;
+                continue;
             }
             // 队列空了才读下一行，实现「按需读取」。
             let mut line = String::new();

@@ -12,6 +12,7 @@ name = "pi"
 path = "src/main.rs"
 
 [dependencies]
+ctrlc = { workspace = true }
 pi-agent-core = { path = "../pi-agent-core" }
 pi-ai = { path = "../pi-ai" }
 pi-tui = { path = "../pi-tui" }

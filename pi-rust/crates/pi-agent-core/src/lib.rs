@@ -286,9 +286,39 @@ impl Agent {
         let mut results = Vec::new();
         let mut terminate = true;
         let mut has_calls = false;
+        let mut interrupted_batch = false;
         for block in &message.content {
             if let AssistantContent::ToolCall(call) = block {
                 has_calls = true;
+
+                // 用户按了 Ctrl+C：不再执行剩余工具，给这条调用补一条
+                // 错误结果（对话结构保持完整），然后终止整批。
+                if pi_ai::interrupt::is_requested() {
+                    interrupted_batch = true;
+                    let result = ToolResult::text("已被用户中断");
+                    sink(AgentEvent::ToolExecutionStart {
+                        tool_call_id: call.id.clone(),
+                        tool_name: call.name.clone(),
+                        args: Value::Object(call.arguments.clone()),
+                    });
+                    sink(AgentEvent::ToolExecutionEnd {
+                        tool_call_id: call.id.clone(),
+                        tool_name: call.name.clone(),
+                        result: Box::new(result.clone()),
+                        is_error: true,
+                    });
+                    let result_message = tool_result_message(call, result, true);
+                    sink(AgentEvent::MessageStart {
+                        message: Box::new(result_message.clone().into()),
+                    });
+                    sink(AgentEvent::MessageEnd {
+                        message: Box::new(result_message.clone().into()),
+                    });
+                    self.messages.push(result_message.clone().into());
+                    results.push(result_message);
+                    continue;
+                }
+
                 sink(AgentEvent::ToolExecutionStart {
                     tool_call_id: call.id.clone(),
                     tool_name: call.name.clone(),
@@ -318,8 +348,13 @@ impl Agent {
                 results.push(result_message);
             }
         }
-        // 空批次（没有工具调用）不触发终止。
-        (results, has_calls && terminate)
+        // 空批次（没有工具调用）不触发终止；中断批次强制终止。
+        // 注意工具执行**过程中**也可能置位中断（预检查来不及），循环后补查一次。
+        let interrupted_after = pi_ai::interrupt::is_requested();
+        (
+            results,
+            (has_calls && terminate) || interrupted_batch || interrupted_after,
+        )
     }
 
     /// 执行单个工具调用，返回工具结果和是否失败。
