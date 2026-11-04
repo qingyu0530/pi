@@ -7,8 +7,8 @@ use pi_agent_core::{
 #[cfg(windows)]
 use pi_agent_core::{PowerShellShell, PowerShellTool};
 use pi_ai::{
-    AnthropicMessagesProvider, FauxProvider, FauxResponse, InputType, Model, ModelCost,
-    ModelCostRates, ModelRegistry, ModelThinkingLevel, OpenAiCompletionsProvider,
+    AnthropicMessagesProvider, BedrockProvider, FauxProvider, FauxResponse, InputType, Model,
+    ModelCost, ModelCostRates, ModelRegistry, ModelThinkingLevel, OpenAiCompletionsProvider,
     OpenAiResponsesProvider, Provider, RequestOptions, StopReason, UreqTransport, UserMessage,
     UserMessageContent, UserRole,
 };
@@ -207,6 +207,8 @@ fn build_agent(args: &Args) -> (Agent, String) {
     let api_fallback = match model.api.as_str() {
         "openai-completions" | "openai-responses" => Some("OPENAI_API_KEY"),
         "anthropic-messages" => Some("ANTHROPIC_API_KEY"),
+        // Bedrock 走 Bearer Token（SigV4 凭据签名暂未实现）。
+        "bedrock-converse-stream" => Some("AWS_BEARER_TOKEN_BEDROCK"),
         _ => None,
     };
     let Some(key_env) = api_keys::api_key_env(&provider_name).or(api_fallback) else {
@@ -231,6 +233,10 @@ fn build_agent(args: &Args) -> (Agent, String) {
             api_key,
         )),
         "openai-responses" => Box::new(OpenAiResponsesProvider::new(
+            Box::new(UreqTransport::new()),
+            api_key,
+        )),
+        "bedrock-converse-stream" => Box::new(BedrockProvider::new(
             Box::new(UreqTransport::new()),
             api_key,
         )),

@@ -58,6 +58,7 @@ pub use provider::{CacheRetention, FauxProvider, FauxResponse, Provider, Request
 pub use api::anthropic_messages::{
     AnthropicMessagesProvider, ResolvedAnthropicCompat, resolve_anthropic_compat,
 };
+pub use api::bedrock::BedrockProvider;
 pub use api::http::{HttpError, HttpRequest, HttpTransport};
 pub use api::http_ureq::UreqTransport;
 pub use api::openai_compat::{
